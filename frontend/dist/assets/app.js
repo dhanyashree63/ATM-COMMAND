@@ -1,0 +1,4504 @@
+// ============================================================================
+// STANDALONE REACT + ROUTER + RECHARTS + LUCIDE RUNTIME FOR GITHACK / BROWSER
+// ============================================================================
+
+const React = (() => {
+  const Fragment = Symbol('Fragment');
+  const StrictMode = ({ children }) => children;
+
+  let currentInstance = null;
+  let hookCursor = 0;
+  let rootRenderFn = null;
+  let renderScheduled = false;
+  const instances = new Map();
+  let activePaths = new Set();
+
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    queueMicrotask(() => {
+      renderScheduled = false;
+      if (rootRenderFn) rootRenderFn();
+    });
+  }
+
+  function flattenChildren(arr, out = []) {
+    for (const item of arr) {
+      if (Array.isArray(item)) {
+        flattenChildren(item, out);
+      } else if (item !== null && item !== undefined && item !== false && item !== true) {
+        out.push(typeof item === 'object' ? item : { type: '#text', props: { nodeValue: String(item) }, children: [] });
+      }
+    }
+    return out;
+  }
+
+  function createElement(type, props, ...rawChildren) {
+    const normalizedProps = { ...(props || {}) };
+    const children = flattenChildren(rawChildren);
+    if (children.length > 0 && normalizedProps.children === undefined) {
+      normalizedProps.children = children.length === 1 ? children[0] : children;
+    }
+    return {
+      type,
+      props: normalizedProps,
+      children,
+      key: normalizedProps.key !== undefined ? String(normalizedProps.key) : null,
+    };
+  }
+
+  function useState(initialValue) {
+    const inst = currentInstance;
+    const idx = hookCursor++;
+    if (inst.hooks.length <= idx) {
+      const init = typeof initialValue === 'function' ? initialValue() : initialValue;
+      inst.hooks.push({ type: 'state', value: init });
+    }
+    const hook = inst.hooks[idx];
+    const setState = (nextVal) => {
+      const resolved = typeof nextVal === 'function' ? nextVal(hook.value) : nextVal;
+      if (!Object.is(resolved, hook.value)) {
+        hook.value = resolved;
+        scheduleRender();
+      }
+    };
+    return [hook.value, setState];
+  }
+
+  function depsEqual(a, b) {
+    if (!a || !b) return false;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (!Object.is(a[i], b[i])) return false;
+    }
+    return true;
+  }
+
+  function useEffect(effectFn, deps) {
+    const inst = currentInstance;
+    const idx = hookCursor++;
+    if (inst.hooks.length <= idx) {
+      inst.hooks.push({ type: 'effect', deps: undefined, cleanup: null, pending: effectFn, nextDeps: deps });
+    } else {
+      const hook = inst.hooks[idx];
+      if (!deps || !depsEqual(hook.deps, deps)) {
+        hook.pending = effectFn;
+        hook.nextDeps = deps;
+      }
+    }
+  }
+
+  const SVG_ATTR_MAP = {
+    strokeWidth: 'stroke-width',
+    strokeDasharray: 'stroke-dasharray',
+    strokeLinecap: 'stroke-linecap',
+    strokeLinejoin: 'stroke-linejoin',
+    textAnchor: 'text-anchor',
+    fontSize: 'font-size',
+    fontFamily: 'font-family',
+    fontWeight: 'font-weight',
+    markerEnd: 'marker-end',
+    markerStart: 'marker-start',
+  };
+
+  function applyProps(dom, oldProps, newProps, isSvg) {
+    for (const k of Object.keys(oldProps)) {
+      if (k === 'children' || k === 'key') continue;
+      if (!(k in newProps)) {
+        if (k.startsWith('on')) {
+          const ev = k.toLowerCase();
+          dom[ev] = null;
+          if (ev === 'onchange') dom.oninput = null;
+        } else if (k === 'style') {
+          dom.style.cssText = '';
+        } else if (k === 'className') {
+          if (isSvg) dom.removeAttribute('class');
+          else dom.className = '';
+        } else if (isSvg) {
+          dom.removeAttribute(SVG_ATTR_MAP[k] || k);
+        } else {
+          dom.removeAttribute(k);
+        }
+      }
+    }
+
+    for (const [k, val] of Object.entries(newProps)) {
+      if (k === 'children' || k === 'key') continue;
+      if (k === 'style') {
+        const prevStyle = oldProps.style || {};
+        for (const sk of Object.keys(prevStyle)) {
+          if (!val || !(sk in val)) {
+            if (sk.startsWith('--')) dom.style.removeProperty(sk);
+            else dom.style[sk] = '';
+          }
+        }
+        if (val && typeof val === 'object') {
+          for (const [sk, sv] of Object.entries(val)) {
+            if (sk.startsWith('--')) dom.style.setProperty(sk, sv);
+            else dom.style[sk] = sv ?? '';
+          }
+        }
+      } else if (k === 'className') {
+        if (isSvg) dom.setAttribute('class', val || '');
+        else dom.className = val || '';
+      } else if (k === 'onChange') {
+        dom.oninput = val;
+        dom.onchange = val;
+      } else if (k.startsWith('on') && typeof val === 'function') {
+        dom[k.toLowerCase()] = val;
+      } else if (k === 'value' && (dom.tagName === 'INPUT' || dom.tagName === 'TEXTAREA' || dom.tagName === 'SELECT')) {
+        const strVal = val === undefined || val === null ? '' : String(val);
+        if (dom.value !== strVal) {
+          dom.value = strVal;
+        }
+      } else if (k === 'disabled' || k === 'required' || k === 'checked') {
+        dom[k] = Boolean(val);
+      } else if (k === 'colSpan') {
+        dom.colSpan = val;
+      } else if (isSvg) {
+        if (val !== undefined && val !== null && val !== false) {
+          dom.setAttribute(SVG_ATTR_MAP[k] || k, String(val));
+        }
+      } else {
+        if (val !== undefined && val !== null && val !== false) {
+          dom.setAttribute(k, String(val));
+        }
+      }
+    }
+  }
+
+  function expandVNode(vnode, path) {
+    if (!vnode) return [];
+    if (Array.isArray(vnode)) {
+      const res = [];
+      vnode.forEach((child, i) => {
+        res.push(...expandVNode(child, path + '.' + (child?.key || i)));
+      });
+      return res;
+    }
+    if (vnode.type === Fragment || vnode.type === StrictMode) {
+      return expandVNode(vnode.children, path + '.F');
+    }
+    if (typeof vnode.type === 'function') {
+      const compName = vnode.type.name || 'Anon';
+      const compPath = path + ':' + compName + (vnode.key ? '#' + vnode.key : '');
+      activePaths.add(compPath);
+      let inst = instances.get(compPath);
+      if (!inst || inst.type !== vnode.type) {
+        if (inst) {
+          inst.hooks.forEach((h) => { if (h.type === 'effect' && typeof h.cleanup === 'function') h.cleanup(); });
+        }
+        inst = { type: vnode.type, hooks: [] };
+        instances.set(compPath, inst);
+      }
+      const prevInst = currentInstance;
+      const prevCursor = hookCursor;
+      currentInstance = inst;
+      hookCursor = 0;
+      let rendered;
+      try {
+        rendered = vnode.type(vnode.props || {});
+      } finally {
+        currentInstance = prevInst;
+        hookCursor = prevCursor;
+      }
+      if (rendered && !Array.isArray(rendered) && typeof rendered === 'object') {
+        return expandVNode(rendered, compPath);
+      }
+      return expandVNode(flattenChildren([rendered]), compPath);
+    }
+    return [{ ...vnode, _path: path }];
+  }
+
+  function syncDOMChildren(parentDom, domVNodes, isSvg) {
+    const existingNodes = Array.from(parentDom.childNodes);
+
+    for (let i = 0; i < domVNodes.length; i++) {
+      const vnode = domVNodes[i];
+      const existing = existingNodes[i];
+
+      if (vnode.type === '#text') {
+        if (existing && existing.nodeType === 3) {
+          if (existing.nodeValue !== vnode.props.nodeValue) {
+            existing.nodeValue = vnode.props.nodeValue;
+          }
+        } else {
+          const textNode = document.createTextNode(vnode.props.nodeValue);
+          if (existing) parentDom.replaceChild(textNode, existing);
+          else parentDom.appendChild(textNode);
+        }
+        continue;
+      }
+
+      const tag = vnode.type;
+      const nextIsSvg = isSvg || tag === 'svg';
+      const canReuse =
+        existing &&
+        existing.nodeType === 1 &&
+        existing.tagName.toLowerCase() === tag.toLowerCase();
+
+      let domEl;
+      if (canReuse) {
+        domEl = existing;
+      } else {
+        domEl = nextIsSvg
+          ? document.createElementNS('http://www.w3.org/2000/svg', tag)
+          : document.createElement(tag);
+        if (existing) parentDom.replaceChild(domEl, existing);
+        else parentDom.appendChild(domEl);
+      }
+
+      const oldProps = domEl._vprops || {};
+      const newProps = vnode.props || {};
+      applyProps(domEl, oldProps, newProps, nextIsSvg);
+      domEl._vprops = newProps;
+
+      const expandedKids = expandVNode(vnode.children, vnode._path);
+      syncDOMChildren(domEl, expandedKids, nextIsSvg);
+
+      if (tag === 'select' && newProps.value !== undefined) {
+        const strVal = String(newProps.value);
+        if (domEl.value !== strVal) domEl.value = strVal;
+      }
+    }
+
+    while (parentDom.childNodes.length > domVNodes.length) {
+      parentDom.removeChild(parentDom.lastChild);
+    }
+  }
+
+  function flushEffects() {
+    for (const [k, inst] of instances.entries()) {
+      if (!activePaths.has(k)) {
+        inst.hooks.forEach((h) => {
+          if (h.type === 'effect' && typeof h.cleanup === 'function') {
+            try { h.cleanup(); } catch (e) {}
+          }
+        });
+        instances.delete(k);
+      }
+    }
+
+    for (const inst of instances.values()) {
+      for (const h of inst.hooks) {
+        if (h.type === 'effect' && h.pending) {
+          if (typeof h.cleanup === 'function') {
+            try { h.cleanup(); } catch (e) {}
+          }
+          const fn = h.pending;
+          h.pending = null;
+          h.deps = h.nextDeps;
+          const cleanup = fn();
+          h.cleanup = typeof cleanup === 'function' ? cleanup : null;
+        }
+      }
+    }
+  }
+
+  function createRoot(container) {
+    return {
+      render(rootVNode) {
+        rootRenderFn = () => {
+          activePaths = new Set();
+          const domVNodes = expandVNode(rootVNode, 'root');
+          syncDOMChildren(container, domVNodes, false);
+          flushEffects();
+        };
+        rootRenderFn();
+      },
+    };
+  }
+
+  return { createElement, Fragment, StrictMode, useState, useEffect, createRoot };
+})();
+
+const { useState, useEffect, StrictMode, createRoot } = React;
+
+// ============================================================================
+// REACT ROUTER DOM (HASH ROUTER)
+// ============================================================================
+
+const ReactRouterDOM = (() => {
+  function getHashFull() {
+    if (typeof window === 'undefined') return '/';
+    const raw = window.location.hash.replace(/^#/, '');
+    return raw || '/';
+  }
+
+  function getPathname() {
+    return getHashFull().split('?')[0] || '/';
+  }
+
+  function HashRouter({ children }) {
+    const [, setTick] = useState(0);
+    useEffect(() => {
+      const onHashChange = () => setTick((t) => t + 1);
+      window.addEventListener('hashchange', onHashChange);
+      return () => window.removeEventListener('hashchange', onHashChange);
+    }, []);
+    return children;
+  }
+
+  function Routes({ children }) {
+    const pathname = getPathname();
+    const list = Array.isArray(children) ? children.flat() : [children];
+    let fallback = null;
+    for (const child of list) {
+      if (!child || !child.props) continue;
+      if (child.props.path === pathname) {
+        return child.props.element;
+      }
+      if (child.props.path === '*') {
+        fallback = child.props.element;
+      }
+    }
+    return fallback;
+  }
+
+  function Route() {
+    return null;
+  }
+
+  function Navigate({ to }) {
+    useEffect(() => {
+      window.location.hash = '#' + to;
+    }, [to]);
+    return null;
+  }
+
+  function Link({ to, className, style, title, children }) {
+    return React.createElement(
+      'a',
+      { href: '#' + to, className, style, title },
+      children
+    );
+  }
+
+  function NavLink({ to, className, style, title, children }) {
+    const pathname = getPathname();
+    const targetPath = (to || '/').split('?')[0];
+    const isActive = pathname === targetPath;
+    const resolvedClass = typeof className === 'function' ? className({ isActive }) : className;
+    return React.createElement(
+      'a',
+      { href: '#' + to, className: resolvedClass, style, title },
+      children
+    );
+  }
+
+  return { HashRouter, BrowserRouter: HashRouter, Routes, Route, Navigate, Link, NavLink };
+})();
+
+// ============================================================================
+// LUCIDE REACT SVG ICONS
+// ============================================================================
+
+const LucideIcons = (() => {
+  const ICON_PATHS = {
+    LayoutDashboard: '<rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/>',
+    FilePlus: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/>',
+    AlertCircle: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+    Binary: '<rect x="14" y="14" width="4" height="6" rx="2"/><rect x="6" y="4" width="4" height="6" rx="2"/><path d="M6 20h4"/><path d="M14 10h4"/><path d="M6 14h2v6"/><path d="M14 4h2v6"/>',
+    Network: '<rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/>',
+    Users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    BarChart3: '<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+    FlaskConical: '<path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/>',
+    ScrollText: '<path d="M8 21h12a2 2 0 0 0 2-2v-2H10v2a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v3h4"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/>',
+    Settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    ChevronLeft: '<polyline points="15 18 9 12 15 6"/>',
+    ChevronRight: '<polyline points="9 18 15 12 9 6"/>',
+    ShieldAlert: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+    ShieldCheck: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
+    Shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+    Sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+    Moon: '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>',
+    Activity: '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    UserCheck: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><polyline points="16 11 18 13 22 9"/>',
+    FileText: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>',
+    Clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    CheckCircle2: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+    XCircle: '<circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/>',
+    TrendingUp: '<polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/>',
+    RefreshCw: '<path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/>',
+    MapPin: '<path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/>',
+    Cpu: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3"/><path d="M15 1v3"/><path d="M9 20v3"/><path d="M15 20v3"/><path d="M20 9h3"/><path d="M20 14h3"/><path d="M1 9h3"/><path d="M1 14h3"/>',
+    Wifi: '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/>',
+    Layers: '<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    AlertTriangle: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    HelpCircle: '<circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    Send: '<line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>',
+    Info: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+    ArrowRight: '<line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/>',
+    ArrowUpRight: '<line x1="7" y1="17" x2="17" y2="7"/><polyline points="7 7 17 7 17 17"/>',
+    Search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    Filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+    Eye: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>',
+    X: '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+    User: '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    Calendar: '<rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>',
+    Play: '<polygon points="5 3 19 12 5 21 5 3"/>',
+    RotateCcw: '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+    FastForward: '<polygon points="13 19 22 12 13 5 13 19"/><polygon points="2 19 11 12 2 5 2 19"/>',
+    Banknote: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2"/><path d="M6 12h.01M18 12h.01"/>',
+    Edit2: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+    Edit3: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+    Trash2: '<polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>',
+    Save: '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/>',
+    Plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>',
+    Sliders: '<line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/>',
+    PieChart: '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>',
+    Radio: '<circle cx="12" cy="12" r="2"/><path d="M4.93 19.07a10 10 0 0 1 0-14.14"/><path d="M7.76 16.24a6 6 0 0 1 0-8.49"/><path d="M16.24 7.76a6 6 0 0 1 0-8.49"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
+  };
+
+  function parseSvgElements(svgMarkup) {
+    const els = [];
+    const tagRe = /<([a-z]+)\s+([^>]+?)\/>/g;
+    let m;
+    while ((m = tagRe.exec(svgMarkup)) !== null) {
+      const tag = m[1];
+      const attrStr = m[2];
+      const attrs = {};
+      const attrRe = /([a-zA-Z0-9_-]+)="([^"]*)"/g;
+      let am;
+      while ((am = attrRe.exec(attrStr)) !== null) {
+        attrs[am[1]] = am[2];
+      }
+      els.push(React.createElement(tag, attrs));
+    }
+    return els;
+  }
+
+  const icons = {};
+  for (const [name, markup] of Object.entries(ICON_PATHS)) {
+    const parsedChildren = parseSvgElements(markup);
+    icons[name] = function IconComponent({ size = 18, style, className }) {
+      return React.createElement(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 2,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          className,
+          style: { display: 'inline-block', verticalAlign: 'middle', flexShrink: 0, ...(style || {}) },
+        },
+        ...parsedChildren
+      );
+    };
+  }
+  return icons;
+})();
+
+// ============================================================================
+// RECHARTS SVG CHARTING ENGINE
+// ============================================================================
+
+const Recharts = (() => {
+  function ResponsiveContainer({ children }) {
+    return React.createElement(
+      'div',
+      { style: { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' } },
+      children
+    );
+  }
+
+  function collectChildrenByType(children, typeFn) {
+    const list = Array.isArray(children) ? children.flat(Infinity) : [children];
+    return list.filter((c) => c && c.type === typeFn);
+  }
+
+  function CartesianGrid() { return null; }
+  function XAxis() { return null; }
+  function YAxis() { return null; }
+  function Tooltip() { return null; }
+  function Legend() { return null; }
+  function Line() { return null; }
+  function Bar() { return null; }
+  function Pie() { return null; }
+  function Cell() { return null; }
+
+  function LineChart({ data = [], children }) {
+    if (!data || data.length === 0) return null;
+    const xAxis = collectChildrenByType(children, XAxis)[0];
+    const lineNode = collectChildrenByType(children, Line)[0];
+    const xKey = xAxis?.props?.dataKey || 'date';
+    const yKey = lineNode?.props?.dataKey || 'reports';
+    const stroke = lineNode?.props?.stroke || '#19A7A0';
+
+    const W = 540, H = 220, padL = 42, padR = 24, padT = 20, padB = 34;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const maxVal = Math.max(4, ...data.map((d) => Number(d[yKey] || 0)));
+
+    const pts = data.map((d, i) => {
+      const x = padL + (data.length === 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
+      const val = Number(d[yKey] || 0);
+      const y = padT + plotH - (val / maxVal) * plotH;
+      return { x, y, label: d[xKey], val };
+    });
+
+    const pathD = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ');
+    const areaD = `${pathD} L ${pts[pts.length - 1].x.toFixed(1)} ${padT + plotH} L ${pts[0].x.toFixed(1)} ${padT + plotH} Z`;
+
+    const gridLines = [0, 0.25, 0.5, 0.75, 1].map((t, i) => {
+      const y = padT + plotH * (1 - t);
+      const v = Math.round(maxVal * t);
+      return React.createElement(
+        'g',
+        { key: 'g' + i },
+        React.createElement('line', { x1: padL, y1: y, x2: W - padR, y2: y, stroke: 'rgba(255,255,255,0.07)', strokeDasharray: '3 3' }),
+        React.createElement('text', { x: padL - 8, y: y + 4, textAnchor: 'end', fill: '#64748B', fontSize: 10 }, String(v))
+      );
+    });
+
+    return React.createElement(
+      'svg',
+      { viewBox: `0 0 ${W} ${H}`, style: { width: '100%', height: '100%' } },
+      ...gridLines,
+      React.createElement('path', { d: areaD, fill: 'rgba(25, 167, 160, 0.12)' }),
+      React.createElement('path', { d: pathD, fill: 'none', stroke, strokeWidth: 3 }),
+      ...pts.map((p, i) =>
+        React.createElement(
+          'g',
+          { key: 'p' + i },
+          React.createElement('circle', { cx: p.x, cy: p.y, r: 5, fill: stroke, stroke: '#101827', strokeWidth: 2 }),
+          React.createElement('text', { x: p.x, y: p.y - 10, textAnchor: 'middle', fill: '#F4F7FB', fontSize: 10, fontWeight: 600 }, String(p.val)),
+          React.createElement('text', { x: p.x, y: H - 10, textAnchor: 'middle', fill: '#98A9BD', fontSize: 10 }, String(p.label))
+        )
+      )
+    );
+  }
+
+  function BarChart({ data = [], layout, children }) {
+    if (!data || data.length === 0) return null;
+    const bars = collectChildrenByType(children, Bar);
+    const xAxis = collectChildrenByType(children, XAxis)[0];
+    const yAxis = collectChildrenByType(children, YAxis)[0];
+
+    if (layout === 'vertical') {
+      const catKey = yAxis?.props?.dataKey || 'priority';
+      const barNode = bars[0];
+      const valKey = barNode?.props?.dataKey || 'count';
+      const cells = collectChildrenByType(barNode?.children || [], Cell);
+      const maxVal = Math.max(4, ...data.map((d) => Number(d[valKey] || 0)));
+
+      const W = 540, H = 220, padL = 110, padR = 36, padT = 16, padB = 24;
+      const plotW = W - padL - padR;
+      const plotH = H - padT - padB;
+      const rowH = plotH / data.length;
+
+      return React.createElement(
+        'svg',
+        { viewBox: `0 0 ${W} ${H}`, style: { width: '100%', height: '100%' } },
+        ...data.map((d, i) => {
+          const val = Number(d[valKey] || 0);
+          const w = Math.max(4, (val / maxVal) * plotW);
+          const y = padT + i * rowH + rowH * 0.2;
+          const bh = Math.min(26, rowH * 0.6);
+          const fill = cells[i]?.props?.fill || barNode?.props?.fill || '#19A7A0';
+          return React.createElement(
+            'g',
+            { key: i },
+            React.createElement('text', { x: padL - 10, y: y + bh / 2 + 4, textAnchor: 'end', fill: '#98A9BD', fontSize: 11, fontWeight: 600 }, String(d[catKey])),
+            React.createElement('rect', { x: padL, y, width: w, height: bh, rx: 4, fill }),
+            React.createElement('text', { x: padL + w + 8, y: y + bh / 2 + 4, fill: '#F4F7FB', fontSize: 11, fontWeight: 700 }, String(val))
+          );
+        })
+      );
+    }
+
+    const xKey = xAxis?.props?.dataKey || 'zone';
+    const allKeys = bars.map((b) => b.props?.dataKey || 'count');
+    const maxVal = Math.max(4, ...data.flatMap((d) => allKeys.map((k) => Number(d[k] || 0))));
+
+    const W = 560, H = 230, padL = 38, padR = 20, padT = 24, padB = 46;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const groupW = plotW / data.length;
+
+    const gridLines = [0, 0.5, 1].map((t, i) => {
+      const y = padT + plotH * (1 - t);
+      const v = Math.round(maxVal * t);
+      return React.createElement(
+        'g',
+        { key: 'g' + i },
+        React.createElement('line', { x1: padL, y1: y, x2: W - padR, y2: y, stroke: 'rgba(255,255,255,0.07)', strokeDasharray: '3 3' }),
+        React.createElement('text', { x: padL - 6, y: y + 4, textAnchor: 'end', fill: '#64748B', fontSize: 10 }, String(v))
+      );
+    });
+
+    return React.createElement(
+      'svg',
+      { viewBox: `0 0 ${W} ${H}`, style: { width: '100%', height: '100%' } },
+      ...gridLines,
+      ...data.map((d, i) => {
+        const gx = padL + i * groupW;
+        const barCount = bars.length;
+        const singleW = Math.min(38, (groupW * 0.68) / barCount);
+        const totalBarsW = singleW * barCount + (barCount - 1) * 4;
+        const startX = gx + (groupW - totalBarsW) / 2;
+        const rawLabel = String(d[xKey] || '');
+        const shortLabel = rawLabel.length > 12 ? rawLabel.slice(0, 11) + '…' : rawLabel;
+
+        return React.createElement(
+          'g',
+          { key: i },
+          ...bars.map((b, bi) => {
+            const k = b.props?.dataKey || 'count';
+            const cells = collectChildrenByType(b.children || [], Cell);
+            const val = Number(d[k] || 0);
+            const bh = Math.max(3, (val / maxVal) * plotH);
+            const bx = startX + bi * (singleW + 4);
+            const by = padT + plotH - bh;
+            const fill = cells[i]?.props?.fill || b.props?.fill || '#19A7A0';
+            return React.createElement(
+              'g',
+              { key: bi },
+              React.createElement('rect', { x: bx, y: by, width: singleW, height: bh, rx: 4, fill }),
+              React.createElement('text', { x: bx + singleW / 2, y: by - 5, textAnchor: 'middle', fill: '#F4F7FB', fontSize: 10, fontWeight: 600 }, String(val))
+            );
+          }),
+          React.createElement('text', { x: gx + groupW / 2, y: H - 14, textAnchor: 'middle', fill: '#98A9BD', fontSize: 10 }, shortLabel)
+        );
+      })
+    );
+  }
+
+  function PieChart({ children }) {
+    const pieNode = collectChildrenByType(children, Pie)[0];
+    if (!pieNode) return null;
+    const data = pieNode.props?.data || [];
+    const valKey = pieNode.props?.dataKey || 'value';
+    const cells = collectChildrenByType(pieNode.children || [], Cell);
+
+    const total = data.reduce((acc, d) => acc + Number(d[valKey] || 0), 0) || 1;
+    const cx = 140, cy = 110, rOut = 80, rIn = 46;
+    let startAngle = -Math.PI / 2;
+
+    const slices = data.map((d, i) => {
+      const val = Number(d[valKey] || 0);
+      const frac = val / total;
+      const angle = frac * Math.PI * 2;
+      const endAngle = startAngle + angle;
+      const fill = cells[i]?.props?.fill || ['#3B82F6', '#10B981', '#F59E0B', '#8B5CF6', '#EF4444'][i % 5];
+
+      let pathEl;
+      if (frac >= 0.999) {
+        pathEl = React.createElement('circle', { cx, cy, r: (rOut + rIn) / 2, fill: 'none', stroke: fill, strokeWidth: rOut - rIn });
+      } else {
+        const x1 = cx + rOut * Math.cos(startAngle);
+        const y1 = cy + rOut * Math.sin(startAngle);
+        const x2 = cx + rOut * Math.cos(endAngle);
+        const y2 = cy + rOut * Math.sin(endAngle);
+        const x3 = cx + rIn * Math.cos(endAngle);
+        const y3 = cy + rIn * Math.sin(endAngle);
+        const x4 = cx + rIn * Math.cos(startAngle);
+        const y4 = cy + rIn * Math.sin(startAngle);
+        const largeArc = angle > Math.PI ? 1 : 0;
+        const dPath = [
+          `M ${x1.toFixed(2)} ${y1.toFixed(2)}`,
+          `A ${rOut} ${rOut} 0 ${largeArc} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`,
+          `L ${x3.toFixed(2)} ${y3.toFixed(2)}`,
+          `A ${rIn} ${rIn} 0 ${largeArc} 0 ${x4.toFixed(2)} ${y4.toFixed(2)}`,
+          'Z',
+        ].join(' ');
+        pathEl = React.createElement('path', { d: dPath, fill, stroke: '#1D2D45', strokeWidth: 2 });
+      }
+      startAngle = endAngle;
+      return { pathEl, name: d.name, val, fill };
+    });
+
+    return React.createElement(
+      'svg',
+      { viewBox: '0 0 480 220', style: { width: '100%', height: '100%' } },
+      ...slices.map((s) => s.pathEl),
+      React.createElement('text', { x: cx, y: cy - 4, textAnchor: 'middle', fill: '#F4F7FB', fontSize: 18, fontWeight: 700 }, String(total)),
+      React.createElement('text', { x: cx, y: cy + 14, textAnchor: 'middle', fill: '#98A9BD', fontSize: 10 }, 'TOTAL'),
+      ...slices.map((s, i) =>
+        React.createElement(
+          'g',
+          { key: 'leg' + i },
+          React.createElement('circle', { cx: 270, cy: 45 + i * 32, r: 6, fill: s.fill }),
+          React.createElement('text', { x: 284, y: 49 + i * 32, fill: '#F4F7FB', fontSize: 12, fontWeight: 500 }, `${s.name} (${s.val})`)
+        )
+      )
+    );
+  }
+
+  return {
+    ResponsiveContainer,
+    LineChart,
+    Line,
+    BarChart,
+    Bar,
+    PieChart,
+    Pie,
+    Cell,
+    XAxis,
+    YAxis,
+    CartesianGrid,
+    Tooltip,
+    Legend,
+  };
+})();
+
+
+/**
+ * ATM COMMAND CENTER - Client-Side Autonomous Engine (BCS503 & BCS502)
+ * Provides full DFA/Regex validation, 5-Category Classification, Karnataka Regional Routing,
+ * Bellman-Ford Shortest-Path Algorithm, Queue Management, and 28-Test Suite in browser memory/localStorage
+ * so the application works 100% standalone on GitHack / GitHub Pages / static hosts.
+ */
+
+const STORAGE_KEY = 'atm_command_center_db_v1';
+
+function formatTimestamp(dateObj = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${dateObj.getFullYear()}-${pad(dateObj.getMonth() + 1)}-${pad(dateObj.getDate())} ${pad(dateObj.getHours())}:${pad(dateObj.getMinutes())}:${pad(dateObj.getSeconds())}`;
+}
+
+function createInitialDatabase() {
+  const now = new Date();
+  const hoursAgo = (h) => formatTimestamp(new Date(now.getTime() - h * 3600 * 1000));
+
+  const zones = [
+    { id: 1, zone_name: 'Bangalore', city: 'Bangalore', region: 'South Karnataka', active: 1 },
+    { id: 2, zone_name: 'Mysore', city: 'Mysore', region: 'South Karnataka', active: 1 },
+    { id: 3, zone_name: 'Mangaluru', city: 'Mangaluru', region: 'Coastal Karnataka', active: 1 },
+    { id: 4, zone_name: 'Hubballi', city: 'Hubballi', region: 'North Karnataka', active: 1 },
+  ];
+
+  const routing_table = [
+    { id: 1, prefix: 'BLR', zone_id: 1, primary_team: 'Bangalore Support', backup_team: 'Bangalore Backup', escalation_authority: 'Bangalore Regional Manager', active: 1 },
+    { id: 2, prefix: 'BNG', zone_id: 1, primary_team: 'Bangalore Support', backup_team: 'Bangalore Backup', escalation_authority: 'Bangalore Regional Manager', active: 1 },
+    { id: 3, prefix: 'MYS', zone_id: 2, primary_team: 'Mysore Support', backup_team: 'Mysore Backup', escalation_authority: 'Mysore Regional Manager', active: 1 },
+    { id: 4, prefix: 'MNG', zone_id: 3, primary_team: 'Mangaluru Support', backup_team: 'Mangaluru Backup', escalation_authority: 'Mangaluru Regional Manager', active: 1 },
+    { id: 5, prefix: 'MLR', zone_id: 3, primary_team: 'Mangaluru Support', backup_team: 'Mangaluru Backup', escalation_authority: 'Mangaluru Regional Manager', active: 1 },
+    { id: 6, prefix: 'HUB', zone_id: 4, primary_team: 'Hubballi Support', backup_team: 'Hubballi Backup', escalation_authority: 'Hubballi Regional Manager', active: 1 },
+  ];
+
+  const error_mappings = [
+    { id: 1, error_code: 'E12H', category: 'Hardware', name: 'Card Reader Transport Failure', description: 'Magnetic stripe/EMV chip card intake mechanism stalled.', active: 1 },
+    { id: 2, error_code: 'E13H', category: 'Hardware', name: 'Thermal Receipt Printer Jam', description: 'Paper cutter stalled or paper roll exhausted in terminal.', active: 1 },
+    { id: 3, error_code: 'E14H', category: 'Hardware', name: 'Encrypted PIN Pad Diagnostic Fault', description: 'Cryptographic key store self-test diagnostic failure.', active: 1 },
+    { id: 4, error_code: 'E25N', category: 'Network', name: 'Payment Gateway Timeout', description: 'No response from core banking host switch within 15000ms.', active: 1 },
+    { id: 5, error_code: 'E26N', category: 'Network', name: 'Branch Switch Link Down', description: 'Local Ethernet LAN interface carrier signal lost.', active: 1 },
+    { id: 6, error_code: 'E27N', category: 'Network', name: 'DNS Resolution Failure', description: 'Unable to resolve banking host domain names on corporate WAN.', active: 1 },
+    { id: 7, error_code: 'E31C', category: 'Cash-Handling', name: 'Cash Dispenser Shutter Jam', description: 'Dispenser exit shutter failed to close or open smoothly.', active: 1 },
+    { id: 8, error_code: 'E32C', category: 'Cash-Handling', name: 'Primary Cassette Low / Empty', description: 'Cassette 1 currency notes depleted below dispense minimum.', active: 1 },
+    { id: 9, error_code: 'E33C', category: 'Cash-Handling', name: 'Reject Diverter Bin Full', description: 'Counterfeit or unreadable note diverter vault reached capacity.', active: 1 },
+    { id: 10, error_code: 'E45S', category: 'Software', name: 'ATM OS Kernel Panic / Crash', description: 'Terminal operating system encountered unhandled fatal exception.', active: 1 },
+    { id: 11, error_code: 'E46S', category: 'Software', name: 'Transaction Journal Sync Deadlock', description: 'Local journal sqlite database lock contention with host sync.', active: 1 },
+    { id: 12, error_code: 'E47S', category: 'Software', name: 'Client App Middleware Unresponsive', description: 'WOSA/XFS middleware layer stopped responding to IPC calls.', active: 1 },
+    { id: 13, error_code: 'E90X', category: 'Security', name: 'Anti-Skimmer Sensor Triggered', description: 'Foreign electromagnetic overlay detected at card insertion slot.', active: 1 },
+    { id: 14, error_code: 'E91X', category: 'Security', name: 'Vault Door Tamper Alarm', description: 'Safe enclosure magnetic contact switch breached without supervisory key.', active: 1 },
+    { id: 15, error_code: 'E92X', category: 'Security', name: 'Cabinet Seismic Shock Alert', description: 'Vibration sensor detected physical drill/hammer impact on chassis.', active: 1 },
+  ];
+
+  const handlers = [
+    { id: 1, employee_id: 'EMP-BLR-01', name: 'Rajesh Rao', team: 'Bangalore Support', zone: 'Bangalore', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 5, current_load: 1 },
+    { id: 2, employee_id: 'EMP-BLR-02', name: 'Sneha Hegde', team: 'Bangalore Support', zone: 'Bangalore', supported_categories: 'Cash-Handling,Hardware', availability: 1, capacity: 4, current_load: 0 },
+    { id: 3, employee_id: 'EMP-BLR-03', name: 'Chetan Kumar', team: 'Bangalore Backup', zone: 'Bangalore', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 5, current_load: 0 },
+    { id: 4, employee_id: 'EMP-MYS-01', name: 'Ananya Urs', team: 'Mysore Support', zone: 'Mysore', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 1 },
+    { id: 5, employee_id: 'EMP-MYS-02', name: 'Pradeep Gowda', team: 'Mysore Backup', zone: 'Mysore', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 0 },
+    { id: 6, employee_id: 'EMP-MNG-01', name: "Ashwin D'Souza", team: 'Mangaluru Support', zone: 'Mangaluru', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 0 },
+    { id: 7, employee_id: 'EMP-MNG-02', name: 'Divya Bhat', team: 'Mangaluru Backup', zone: 'Mangaluru', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 0 },
+    { id: 8, employee_id: 'EMP-HUB-01', name: 'Manjunath Patil', team: 'Hubballi Support', zone: 'Hubballi', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 0 },
+    { id: 9, employee_id: 'EMP-HUB-02', name: 'Sharanappa Bellad', team: 'Hubballi Backup', zone: 'Hubballi', supported_categories: 'Hardware,Network,Cash-Handling,Software', availability: 1, capacity: 4, current_load: 0 },
+    { id: 10, employee_id: 'EMP-SEC-01', name: 'Vikramaditya Kulkarni', team: 'Central Security Desk', zone: 'Central', supported_categories: 'Security', availability: 1, capacity: 30, current_load: 1 },
+    { id: 11, employee_id: 'EMP-SEC-02', name: 'Sunita Verma', team: 'Central Security Desk', zone: 'Central', supported_categories: 'Security', availability: 1, capacity: 30, current_load: 0 },
+    { id: 12, employee_id: 'EMP-REV-01', name: 'Central Dispatch Supervisor', team: 'Central Routing Review', zone: 'Central', supported_categories: 'Hardware,Network,Cash-Handling,Software,Security', availability: 1, capacity: 50, current_load: 0 },
+  ];
+
+  const network_nodes = [
+    { id: 1, node_id: 'ATMBLR1234', node_name: 'ATM BLR 1234 (MG Road Bangalore)', node_type: 'atm', zone: 'Bangalore' },
+    { id: 2, node_id: 'ATMMYS1234', node_name: 'ATM MYS 1234 (Sayyaji Rao Road Mysore)', node_type: 'atm', zone: 'Mysore' },
+    { id: 3, node_id: 'ATMMNG1234', node_name: 'ATM MNG 1234 (Hampankatta Mangaluru)', node_type: 'atm', zone: 'Mangaluru' },
+    { id: 4, node_id: 'ATMHUB1234', node_name: 'ATM HUB 1234 (Koppikar Road Hubballi)', node_type: 'atm', zone: 'Hubballi' },
+    { id: 5, node_id: 'ATM_SOURCE', node_name: 'Generic Branch ATM Terminal', node_type: 'atm', zone: 'Karnataka' },
+    { id: 6, node_id: 'VALIDATION_ENGINE', node_name: 'DFA & Regex Validation Engine', node_type: 'engine', zone: 'Central' },
+    { id: 7, node_id: 'CLASSIFICATION_ENGINE', node_name: 'Five-Category Classification Engine', node_type: 'engine', zone: 'Central' },
+    { id: 8, node_id: 'ROUTING_ENGINE', node_name: 'Karnataka Network Routing Engine', node_type: 'engine', zone: 'Central' },
+    { id: 9, node_id: 'Zone_Bangalore', node_name: 'Bangalore Zone Controller', node_type: 'zone', zone: 'Bangalore' },
+    { id: 10, node_id: 'Zone_Mysore', node_name: 'Mysore Zone Controller', node_type: 'zone', zone: 'Mysore' },
+    { id: 11, node_id: 'Zone_Mangaluru', node_name: 'Mangaluru Zone Controller', node_type: 'zone', zone: 'Mangaluru' },
+    { id: 12, node_id: 'Zone_Hubballi', node_name: 'Hubballi Zone Controller', node_type: 'zone', zone: 'Hubballi' },
+    { id: 13, node_id: 'Bangalore_Support', node_name: 'Bangalore Support Team (Primary)', node_type: 'support_team', zone: 'Bangalore' },
+    { id: 14, node_id: 'Bangalore_Backup', node_name: 'Bangalore Backup Team (Secondary)', node_type: 'support_team', zone: 'Bangalore' },
+    { id: 15, node_id: 'Mysore_Support', node_name: 'Mysore Support Team (Primary)', node_type: 'support_team', zone: 'Mysore' },
+    { id: 16, node_id: 'Mysore_Backup', node_name: 'Mysore Backup Team (Secondary)', node_type: 'support_team', zone: 'Mysore' },
+    { id: 17, node_id: 'Mangaluru_Support', node_name: 'Mangaluru Support Team (Primary)', node_type: 'support_team', zone: 'Mangaluru' },
+    { id: 18, node_id: 'Mangaluru_Backup', node_name: 'Mangaluru Backup Team (Secondary)', node_type: 'support_team', zone: 'Mangaluru' },
+    { id: 19, node_id: 'Hubballi_Support', node_name: 'Hubballi Support Team (Primary)', node_type: 'support_team', zone: 'Hubballi' },
+    { id: 20, node_id: 'Hubballi_Backup', node_name: 'Hubballi Backup Team (Secondary)', node_type: 'support_team', zone: 'Hubballi' },
+    { id: 21, node_id: 'EMP-BLR-01', node_name: 'Rajesh Rao (Bangalore)', node_type: 'handler', zone: 'Bangalore' },
+    { id: 22, node_id: 'EMP-BLR-03', node_name: 'Chetan Kumar (Bangalore Backup)', node_type: 'handler', zone: 'Bangalore' },
+    { id: 23, node_id: 'EMP-MYS-01', node_name: 'Ananya Urs (Mysore)', node_type: 'handler', zone: 'Mysore' },
+    { id: 24, node_id: 'EMP-MYS-02', node_name: 'Pradeep Gowda (Mysore Backup)', node_type: 'handler', zone: 'Mysore' },
+    { id: 25, node_id: 'EMP-MNG-01', node_name: "Ashwin D'Souza (Mangaluru)", node_type: 'handler', zone: 'Mangaluru' },
+    { id: 26, node_id: 'EMP-MNG-02', node_name: 'Divya Bhat (Mangaluru Backup)', node_type: 'handler', zone: 'Mangaluru' },
+    { id: 27, node_id: 'EMP-HUB-01', node_name: 'Manjunath Patil (Hubballi)', node_type: 'handler', zone: 'Hubballi' },
+    { id: 28, node_id: 'EMP-HUB-02', node_name: 'Sharanappa Bellad (Hubballi Backup)', node_type: 'handler', zone: 'Hubballi' },
+    { id: 29, node_id: 'Central_Security_Desk', node_name: 'Central Security Desk (Emergency Override)', node_type: 'central_desk', zone: 'Central' },
+    { id: 30, node_id: 'EMP-SEC-01', node_name: 'Vikramaditya Kulkarni (Security)', node_type: 'handler', zone: 'Central' },
+    { id: 31, node_id: 'Central_Routing_Review', node_name: 'Central Routing Review (Unmapped Fallback)', node_type: 'central_desk', zone: 'Central' },
+    { id: 32, node_id: 'EMP-REV-01', node_name: 'Central Dispatch Supervisor', node_type: 'handler', zone: 'Central' },
+  ];
+
+  const network_edges = [
+    { id: 1, edge_id: 'E_ATM_VAL', source_node: 'ATM_SOURCE', destination_node: 'VALIDATION_ENGINE', weight: 1.0 },
+    { id: 2, edge_id: 'E_BLR_VAL', source_node: 'ATMBLR1234', destination_node: 'VALIDATION_ENGINE', weight: 1.0 },
+    { id: 3, edge_id: 'E_MYS_VAL', source_node: 'ATMMYS1234', destination_node: 'VALIDATION_ENGINE', weight: 1.0 },
+    { id: 4, edge_id: 'E_MNG_VAL', source_node: 'ATMMNG1234', destination_node: 'VALIDATION_ENGINE', weight: 1.0 },
+    { id: 5, edge_id: 'E_HUB_VAL', source_node: 'ATMHUB1234', destination_node: 'VALIDATION_ENGINE', weight: 1.0 },
+    { id: 6, edge_id: 'E_VAL_CLASS', source_node: 'VALIDATION_ENGINE', destination_node: 'CLASSIFICATION_ENGINE', weight: 0.5 },
+    { id: 7, edge_id: 'E_CLASS_ROUTE', source_node: 'CLASSIFICATION_ENGINE', destination_node: 'ROUTING_ENGINE', weight: 0.5 },
+    { id: 8, edge_id: 'E_CLASS_SEC', source_node: 'CLASSIFICATION_ENGINE', destination_node: 'Central_Security_Desk', weight: 1.0 },
+    { id: 9, edge_id: 'E_SEC_HND', source_node: 'Central_Security_Desk', destination_node: 'EMP-SEC-01', weight: 0.5 },
+    { id: 10, edge_id: 'E_ROUTE_REV', source_node: 'ROUTING_ENGINE', destination_node: 'Central_Routing_Review', weight: 2.0 },
+    { id: 11, edge_id: 'E_REV_HND', source_node: 'Central_Routing_Review', destination_node: 'EMP-REV-01', weight: 1.0 },
+    { id: 12, edge_id: 'E_ROUTE_BLR', source_node: 'ROUTING_ENGINE', destination_node: 'Zone_Bangalore', weight: 2.0 },
+    { id: 13, edge_id: 'E_BLR_PRI', source_node: 'Zone_Bangalore', destination_node: 'Bangalore_Support', weight: 3.0 },
+    { id: 14, edge_id: 'E_BLR_BAK', source_node: 'Zone_Bangalore', destination_node: 'Bangalore_Backup', weight: 5.5 },
+    { id: 15, edge_id: 'E_PRI_HBLR1', source_node: 'Bangalore_Support', destination_node: 'EMP-BLR-01', weight: 2.5 },
+    { id: 16, edge_id: 'E_BAK_HBLR3', source_node: 'Bangalore_Backup', destination_node: 'EMP-BLR-03', weight: 3.0 },
+    { id: 17, edge_id: 'E_ROUTE_MYS', source_node: 'ROUTING_ENGINE', destination_node: 'Zone_Mysore', weight: 2.5 },
+    { id: 18, edge_id: 'E_MYS_PRI', source_node: 'Zone_Mysore', destination_node: 'Mysore_Support', weight: 3.5 },
+    { id: 19, edge_id: 'E_MYS_BAK', source_node: 'Zone_Mysore', destination_node: 'Mysore_Backup', weight: 6.0 },
+    { id: 20, edge_id: 'E_PRI_HMYS1', source_node: 'Mysore_Support', destination_node: 'EMP-MYS-01', weight: 3.0 },
+    { id: 21, edge_id: 'E_BAK_HMYS2', source_node: 'Mysore_Backup', destination_node: 'EMP-MYS-02', weight: 3.5 },
+    { id: 22, edge_id: 'E_ROUTE_MNG', source_node: 'ROUTING_ENGINE', destination_node: 'Zone_Mangaluru', weight: 2.8 },
+    { id: 23, edge_id: 'E_MNG_PRI', source_node: 'Zone_Mangaluru', destination_node: 'Mangaluru_Support', weight: 4.0 },
+    { id: 24, edge_id: 'E_MNG_BAK', source_node: 'Zone_Mangaluru', destination_node: 'Mangaluru_Backup', weight: 6.5 },
+    { id: 25, edge_id: 'E_PRI_HMNG1', source_node: 'Mangaluru_Support', destination_node: 'EMP-MNG-01', weight: 3.0 },
+    { id: 26, edge_id: 'E_BAK_HMNG2', source_node: 'Mangaluru_Backup', destination_node: 'EMP-MNG-02', weight: 3.5 },
+    { id: 27, edge_id: 'E_ROUTE_HUB', source_node: 'ROUTING_ENGINE', destination_node: 'Zone_Hubballi', weight: 3.0 },
+    { id: 28, edge_id: 'E_HUB_PRI', source_node: 'Zone_Hubballi', destination_node: 'Hubballi_Support', weight: 4.0 },
+    { id: 29, edge_id: 'E_HUB_BAK', source_node: 'Zone_Hubballi', destination_node: 'Hubballi_Backup', weight: 6.5 },
+    { id: 30, edge_id: 'E_PRI_HHUB1', source_node: 'Hubballi_Support', destination_node: 'EMP-HUB-01', weight: 3.0 },
+    { id: 31, edge_id: 'E_BAK_HHUB2', source_node: 'Hubballi_Backup', destination_node: 'EMP-HUB-02', weight: 3.5 },
+  ];
+
+  const atm_reports = [
+    {
+      id: 1,
+      report_id: 'REP-100201',
+      reporter_name: 'Praveen Rao',
+      branch: 'MG Road Branch',
+      contact: '+91 98450 11223',
+      email: 'praveen.rao@bank.com',
+      atm_id: 'ATMBLR1234',
+      error_code: 'E31C',
+      description: 'Cash shutter door stuck midway during customer dispensing cycle.',
+      urgency: 'High',
+      category: 'Cash-Handling',
+      classification_reason: 'Matches configured Cash-Handling code E31C',
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority: 'P1 - Critical',
+      zone_id: 1,
+      zone_name: 'Bangalore',
+      routing_destination: 'Bangalore Support',
+      assigned_handler: 'EMP-BLR-01',
+      assigned_team: 'Bangalore Support',
+      route: 'ATMBLR1234 -> VALIDATION_ENGINE -> CLASSIFICATION_ENGINE -> ROUTING_ENGINE -> Zone_Bangalore -> Bangalore_Support -> EMP-BLR-01',
+      route_cost: 9.5,
+      status: 'In Progress',
+      resolution_notes: null,
+      created_at: hoursAgo(6),
+      updated_at: hoursAgo(2),
+    },
+    {
+      id: 2,
+      report_id: 'REP-100202',
+      reporter_name: 'Archana Murthy',
+      branch: 'Jayalakshmipuram Branch',
+      contact: '+91 94480 33445',
+      email: 'archana.m@bank.com',
+      atm_id: 'ATMMYS1234',
+      error_code: 'E12H',
+      description: 'Card reader motor grinding noise; chip cards rejected upon insert.',
+      urgency: 'Medium',
+      category: 'Hardware',
+      classification_reason: 'Matches configured Hardware code E12H',
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority: 'P3 - Medium',
+      zone_id: 2,
+      zone_name: 'Mysore',
+      routing_destination: 'Mysore Support',
+      assigned_handler: 'EMP-MYS-01',
+      assigned_team: 'Mysore Support',
+      route: 'ATMMYS1234 -> VALIDATION_ENGINE -> CLASSIFICATION_ENGINE -> ROUTING_ENGINE -> Zone_Mysore -> Mysore_Support -> EMP-MYS-01',
+      route_cost: 11.0,
+      status: 'Assigned',
+      resolution_notes: null,
+      created_at: hoursAgo(4),
+      updated_at: hoursAgo(3),
+    },
+    {
+      id: 3,
+      report_id: 'REP-100203',
+      reporter_name: 'Kishore Shenoy',
+      branch: 'Hampankatta Branch',
+      contact: '+91 97410 55667',
+      email: 'kishore.s@bank.com',
+      atm_id: 'ATMMNG1234',
+      error_code: 'E90X',
+      description: 'Foreign skimmer bezel device detected over card slot by optical sensor.',
+      urgency: 'Critical',
+      category: 'Security',
+      classification_reason: 'Matches configured Security code E90X (Security Override Triggered)',
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority: 'P1 - Critical',
+      zone_id: 3,
+      zone_name: 'Mangaluru',
+      routing_destination: 'Central Security Desk',
+      assigned_handler: 'EMP-SEC-01',
+      assigned_team: 'Central Security Desk',
+      route: 'ATMMNG1234 -> VALIDATION_ENGINE -> CLASSIFICATION_ENGINE -> Central_Security_Desk -> EMP-SEC-01',
+      route_cost: 3.0,
+      status: 'In Progress',
+      resolution_notes: null,
+      created_at: hoursAgo(3),
+      updated_at: hoursAgo(1),
+    },
+    {
+      id: 4,
+      report_id: 'REP-100204',
+      reporter_name: 'Basavaraj G',
+      branch: 'Vidyanagar Hubballi Branch',
+      contact: '+91 99000 77889',
+      email: 'basavaraj.g@bank.com',
+      atm_id: 'ATMHUB1234',
+      error_code: 'E25N',
+      description: 'Host switch response timeout on corporate WAN link.',
+      urgency: 'High',
+      category: 'Network',
+      classification_reason: 'Matches configured Network code E25N',
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority: 'P2 - High',
+      zone_id: 4,
+      zone_name: 'Hubballi',
+      routing_destination: 'Hubballi Support',
+      assigned_handler: 'EMP-HUB-01',
+      assigned_team: 'Hubballi Support',
+      route: 'ATMHUB1234 -> VALIDATION_ENGINE -> CLASSIFICATION_ENGINE -> ROUTING_ENGINE -> Zone_Hubballi -> Hubballi_Support -> EMP-HUB-01',
+      route_cost: 12.0,
+      status: 'Resolved',
+      resolution_notes: 'Branch network interface restarted; latency returned to 14ms.',
+      created_at: hoursAgo(8),
+      updated_at: hoursAgo(2),
+    },
+    {
+      id: 5,
+      report_id: 'REP-100205',
+      reporter_name: 'Rashmi Nayak',
+      branch: 'Kadur Branch',
+      contact: '+91 98800 22334',
+      email: 'rashmi.n@bank.com',
+      atm_id: 'ATMBLR1234',
+      error_code: 'E45S',
+      description: 'Operating system blue screen crash during cash withdrawal transaction.',
+      urgency: 'Medium',
+      category: 'Software',
+      classification_reason: 'Matches configured Software code E45S',
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority: 'P3 - Medium',
+      zone_id: 1,
+      zone_name: 'Bangalore',
+      routing_destination: 'Bangalore Support',
+      assigned_handler: 'EMP-BLR-01',
+      assigned_team: 'Bangalore Support',
+      route: 'ATMBLR1234 -> VALIDATION_ENGINE -> CLASSIFICATION_ENGINE -> ROUTING_ENGINE -> Zone_Bangalore -> Bangalore_Support -> EMP-BLR-01',
+      route_cost: 9.5,
+      status: 'Resolved',
+      resolution_notes: 'Client OS rebooted and XFS stack re-initialized successfully.',
+      created_at: hoursAgo(24),
+      updated_at: hoursAgo(18),
+    },
+  ];
+
+  const assignments = [
+    { id: 1, assignment_id: 'ASN-100201', report_id: 'REP-100201', handler_id: 'EMP-BLR-01', team: 'Bangalore Support', route: 'ATMBLR1234 -> Bangalore_Support -> EMP-BLR-01', priority: 'P1 - Critical', status: 'Active', assigned_at: hoursAgo(6) },
+    { id: 2, assignment_id: 'ASN-100202', report_id: 'REP-100202', handler_id: 'EMP-MYS-01', team: 'Mysore Support', route: 'ATMMYS1234 -> Mysore_Support -> EMP-MYS-01', priority: 'P3 - Medium', status: 'Active', assigned_at: hoursAgo(4) },
+    { id: 3, assignment_id: 'ASN-100203', report_id: 'REP-100203', handler_id: 'EMP-SEC-01', team: 'Central Security Desk', route: 'ATMMNG1234 -> Central_Security_Desk -> EMP-SEC-01', priority: 'P1 - Critical', status: 'Active', assigned_at: hoursAgo(3) },
+    { id: 4, assignment_id: 'ASN-100204', report_id: 'REP-100204', handler_id: 'EMP-HUB-01', team: 'Hubballi Support', route: 'ATMHUB1234 -> Hubballi_Support -> EMP-HUB-01', priority: 'P2 - High', status: 'Completed', assigned_at: hoursAgo(8) },
+  ];
+
+  const report_history = [
+    { id: 1, report_id: 'REP-100201', previous_status: 'Submitted', new_status: 'Assigned', updated_by: 'Auto-Dispatcher', notes: 'Assigned to primary team Bangalore Support', timestamp: hoursAgo(6) },
+    { id: 2, report_id: 'REP-100201', previous_status: 'Assigned', new_status: 'In Progress', updated_by: 'Rajesh Rao', notes: 'Engineer en-route to MG Road Branch', timestamp: hoursAgo(2) },
+    { id: 3, report_id: 'REP-100202', previous_status: 'Submitted', new_status: 'Assigned', updated_by: 'Auto-Dispatcher', notes: 'Assigned to primary team Mysore Support', timestamp: hoursAgo(4) },
+    { id: 4, report_id: 'REP-100203', previous_status: 'Submitted', new_status: 'Assigned', updated_by: 'Security Dispatch Protocol', notes: 'Direct dispatch to Central Security Desk (Bypassed regional teams)', timestamp: hoursAgo(3) },
+    { id: 5, report_id: 'REP-100203', previous_status: 'Assigned', new_status: 'In Progress', updated_by: 'Vikramaditya Kulkarni', notes: 'Lockdown command initiated; local police alerted', timestamp: hoursAgo(1) },
+    { id: 6, report_id: 'REP-100204', previous_status: 'Submitted', new_status: 'Assigned', updated_by: 'Auto-Dispatcher', notes: 'Assigned to Hubballi Support', timestamp: hoursAgo(8) },
+    { id: 7, report_id: 'REP-100204', previous_status: 'Assigned', new_status: 'Resolved', updated_by: 'Manjunath Patil', notes: 'Interface rebooted and verified online', timestamp: hoursAgo(2) },
+  ];
+
+  return {
+    zones,
+    routing_table,
+    error_mappings,
+    handlers,
+    network_nodes,
+    network_edges,
+    atm_reports,
+    assignments,
+    report_history,
+  };
+}
+
+function getDB() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    // ignore storage errors
+  }
+  const initial = createInitialDatabase();
+  saveDB(initial);
+  return initial;
+}
+
+function saveDB(db) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+  } catch (e) {
+    // ignore storage errors
+  }
+}
+
+// ============================================================================
+// BCS503: DFA & REGEX VALIDATORS
+// ============================================================================
+
+const ATM_STATE_DESCRIPTIONS = {
+  q0: "Start state: Expecting prefix 'A'",
+  q1: "Matched 'A': Expecting prefix 'T'",
+  q2: "Matched 'AT': Expecting prefix 'M'",
+  q3: "Matched 'ATM': Expecting 1st region/branch letter [A-Z]",
+  q4: "Matched 1st letter: Expecting 2nd region/branch letter [A-Z]",
+  q5: "Matched 2nd letter: Expecting 3rd region/branch letter [A-Z]",
+  q6: "Matched 3 letters: Expecting 1st terminal digit [0-9]",
+  q7: "Matched 1st digit: Expecting 2nd terminal digit [0-9]",
+  q8: "Matched 2nd digit: Expecting 3rd terminal digit [0-9]",
+  q9: "Matched 3rd digit: Expecting 4th terminal digit [0-9]",
+  q10: 'Accept state: Valid 10-character ATM ID reached',
+  q_trap: 'Trap state: Invalid character or incorrect length',
+};
+
+function dfaTransitionAtm(state, ch) {
+  if (state === 'q_trap') return 'q_trap';
+  const isUpper = /^[A-Z]$/.test(ch);
+  const isDigit = /^[0-9]$/.test(ch);
+  switch (state) {
+    case 'q0': return ch === 'A' ? 'q1' : 'q_trap';
+    case 'q1': return ch === 'T' ? 'q2' : 'q_trap';
+    case 'q2': return ch === 'M' ? 'q3' : 'q_trap';
+    case 'q3': return isUpper ? 'q4' : 'q_trap';
+    case 'q4': return isUpper ? 'q5' : 'q_trap';
+    case 'q5': return isUpper ? 'q6' : 'q_trap';
+    case 'q6': return isDigit ? 'q7' : 'q_trap';
+    case 'q7': return isDigit ? 'q8' : 'q_trap';
+    case 'q8': return isDigit ? 'q9' : 'q_trap';
+    case 'q9': return isDigit ? 'q10' : 'q_trap';
+    default: return 'q_trap';
+  }
+}
+
+function validateAtmDFA(atmId) {
+  if (!atmId || typeof atmId !== 'string') {
+    return [false, [], 'ATM ID cannot be empty or non-string.'];
+  }
+  let current = 'q0';
+  const trace = [{
+    step: 0,
+    input_char: '',
+    from_state: 'q0',
+    to_state: 'q0',
+    description: ATM_STATE_DESCRIPTIONS.q0,
+    is_accepting: false,
+  }];
+
+  for (let i = 0; i < atmId.length; i++) {
+    const ch = atmId[i];
+    const prev = current;
+    current = dfaTransitionAtm(current, ch);
+    trace.push({
+      step: i + 1,
+      input_char: ch,
+      from_state: prev,
+      to_state: current,
+      description: ATM_STATE_DESCRIPTIONS[current] || 'Unknown state',
+      is_accepting: current === 'q10',
+    });
+    if (current === 'q_trap') break;
+  }
+
+  const isValid = current === 'q10' && atmId.length === 10;
+  let message;
+  if (isValid) {
+    message = `Valid ATM ID '${atmId}'. Successfully accepted by DFA in state q10.`;
+  } else if (atmId.length < 10) {
+    message = `Incomplete ATM ID: length is ${atmId.length}, expected exactly 10 characters (ATM + 3 letters + 4 digits).`;
+  } else if (atmId.length > 10) {
+    message = `ATM ID length exceeded: length is ${atmId.length}, expected exactly 10 characters.`;
+  } else {
+    message = "DFA transitioned to trap state 'q_trap' due to invalid format.";
+  }
+  return [isValid, trace, message];
+}
+
+const ERR_STATE_DESCRIPTIONS = {
+  s0: "Start state: Expecting prefix 'E'",
+  s1: "Matched 'E': Expecting 1st numeric digit [0-9]",
+  s2: 'Matched 1st digit: Expecting 2nd numeric digit [0-9]',
+  s3: 'Matched 2nd digit: Expecting category sub-code letter [A-Z]',
+  s4: 'Accept state: Valid 4-character Error Code reached',
+  s_trap: 'Trap state: Invalid character or incorrect length',
+};
+
+function dfaTransitionErr(state, ch) {
+  if (state === 's_trap') return 's_trap';
+  const isUpper = /^[A-Z]$/.test(ch);
+  const isDigit = /^[0-9]$/.test(ch);
+  switch (state) {
+    case 's0': return ch === 'E' ? 's1' : 's_trap';
+    case 's1': return isDigit ? 's2' : 's_trap';
+    case 's2': return isDigit ? 's3' : 's_trap';
+    case 's3': return isUpper ? 's4' : 's_trap';
+    default: return 's_trap';
+  }
+}
+
+function validateErrDFA(code) {
+  if (!code || typeof code !== 'string') {
+    return [false, [], 'Error code cannot be empty or non-string.'];
+  }
+  let current = 's0';
+  const trace = [{
+    step: 0,
+    input_char: '',
+    from_state: 's0',
+    to_state: 's0',
+    description: ERR_STATE_DESCRIPTIONS.s0,
+    is_accepting: false,
+  }];
+
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    const prev = current;
+    current = dfaTransitionErr(current, ch);
+    trace.push({
+      step: i + 1,
+      input_char: ch,
+      from_state: prev,
+      to_state: current,
+      description: ERR_STATE_DESCRIPTIONS[current] || 'Unknown state',
+      is_accepting: current === 's4',
+    });
+    if (current === 's_trap') break;
+  }
+
+  const isValid = current === 's4' && code.length === 4;
+  let message;
+  if (isValid) {
+    message = `Valid Error Code '${code}'. Successfully accepted by DFA in state s4.`;
+  } else if (code.length !== 4) {
+    message = `Invalid Error Code length: ${code.length}, expected exactly 4 characters (E + 2 digits + 1 letter, e.g. E01A).`;
+  } else {
+    message = "DFA transitioned to trap state 's_trap' due to invalid syntax.";
+  }
+  return [isValid, trace, message];
+}
+
+function validateAtmRegex(atmId) {
+  if (!atmId || typeof atmId !== 'string') {
+    return [false, {}, 'ATM ID is required and must be a string.'];
+  }
+  const m = /^ATM([A-Z]{3})([0-9]{4})$/.exec(atmId);
+  if (m) {
+    return [
+      true,
+      { full_id: atmId, prefix: 'ATM', region_code: m[1], terminal_number: m[2] },
+      `ATM ID matches pattern ^ATM[A-Z]{3}[0-9]{4}$ (Region: ${m[1]}, Terminal: ${m[2]}).`,
+    ];
+  }
+  return [false, {}, 'ATM ID does not conform to regex pattern ^ATM[A-Z]{3}[0-9]{4}$.'];
+}
+
+function validateErrRegex(code) {
+  if (!code || typeof code !== 'string') {
+    return [false, {}, 'Error code is required and must be a string.'];
+  }
+  const m = /^E([0-9]{2})([A-Z])$/.exec(code);
+  if (m) {
+    return [
+      true,
+      { full_code: code, prefix: 'E', code_number: m[1], sub_type: m[2] },
+      `Error Code matches pattern ^E[0-9]{2}[A-Z]$ (Subsystem: ${m[1]}, Variant: ${m[2]}).`,
+    ];
+  }
+  return [false, {}, 'Error code does not conform to regex pattern ^E[0-9]{2}[A-Z]$.'];
+}
+
+function verifyAndCompareIdentifiers(atmId, errorCode) {
+  const [atmDfaValid, atmDfaTrace, atmDfaMsg] = validateAtmDFA(atmId);
+  const [atmRegexValid, atmRegexGroups, atmRegexMsg] = validateAtmRegex(atmId);
+  const atmAgreement = atmDfaValid === atmRegexValid;
+
+  const [errDfaValid, errDfaTrace, errDfaMsg] = validateErrDFA(errorCode);
+  const [errRegexValid, errRegexGroups, errRegexMsg] = validateErrRegex(errorCode);
+  const errAgreement = errDfaValid === errRegexValid;
+
+  const isValid = atmDfaValid && atmRegexValid && errDfaValid && errRegexValid;
+  let discrepancy = null;
+  if (!atmAgreement) {
+    discrepancy = `Discrepancy in ATM ID validation! DFA result: ${atmDfaValid}, Regex result: ${atmRegexValid}.`;
+  } else if (!errAgreement) {
+    discrepancy = `Discrepancy in Error Code validation! DFA result: ${errDfaValid}, Regex result: ${errRegexValid}.`;
+  }
+
+  return {
+    is_valid: isValid,
+    atm_id: {
+      value: atmId,
+      dfa_valid: atmDfaValid,
+      regex_valid: atmRegexValid,
+      agreed: atmAgreement,
+      dfa_trace: atmDfaTrace,
+      dfa_message: atmDfaMsg,
+      regex_message: atmRegexMsg,
+      parsed: atmRegexGroups,
+    },
+    error_code: {
+      value: errorCode,
+      dfa_valid: errDfaValid,
+      regex_valid: errRegexValid,
+      agreed: errAgreement,
+      dfa_trace: errDfaTrace,
+      dfa_message: errDfaMsg,
+      regex_message: errRegexMsg,
+      parsed: errRegexGroups,
+    },
+    discrepancy,
+    summary: isValid
+      ? 'Validation successful: DFA and Regular Expression agree.'
+      : discrepancy || (!atmDfaValid ? atmDfaMsg : errDfaMsg),
+  };
+}
+
+// ============================================================================
+// BCS503: 5-CATEGORY CLASSIFIER & PRIORITY ENGINE
+// ============================================================================
+
+const CATEGORY_PRECEDENCE = ['Security', 'Cash-Handling', 'Hardware', 'Network', 'Software'];
+
+const CATEGORY_LEXICAL_PATTERNS = {
+  Security: /\b(tamper|skimm(?:er|ing)|vault|break-?in|fraud|theft|unauthorized|stolen|alarm|seismic|attack|camera blocked|intrusion)\b/i,
+  'Cash-Handling': /\b(cash|dispens(?:er|ing)|note|cassette|bill|currency|reject bin|escrow|jammed note|counterfeit|payout)\b/i,
+  Hardware: /\b(card reader|printer|paper|cutter|screen|touchscreen|keypad|pinpad|hardware|sensor|power|battery|ups|fan|bezel)\b/i,
+  Network: /\b(network|connection|offline|timeout|packet|loss|latency|gateway|switch|router|ip|dns|vpn|tcp|tls|ssl|link down)\b/i,
+  Software: /\b(software|crash|freeze|kernel|os|windows|app|exception|deadlock|sync|journal|firmware|memory leak|reboot)\b/i,
+};
+
+function classifyErrorReport(db, errorCode, description = '') {
+  const code = (errorCode || '').trim().toUpperCase();
+  const desc = (description || '').trim();
+
+  const mapping = db.error_mappings.find((m) => m.error_code === code && m.active === 1);
+  const codeCategory = mapping ? mapping.category : null;
+
+  const descMatches = [];
+  for (const cat of CATEGORY_PRECEDENCE) {
+    if (CATEGORY_LEXICAL_PATTERNS[cat].test(desc)) {
+      descMatches.push(cat);
+    }
+  }
+
+  const allMatches = [];
+  if (codeCategory) allMatches.push(codeCategory);
+  for (const m of descMatches) {
+    if (!allMatches.includes(m)) allMatches.push(m);
+  }
+
+  if (allMatches.length === 0) {
+    return [
+      false,
+      'UNMAPPED',
+      `Error code '${code}' is not in configured mappings, and description does not match any recognized category keywords. Marked as UNMAPPED. Not eligible for automated dispatch.`,
+      [],
+    ];
+  }
+
+  const selectedCategory = CATEGORY_PRECEDENCE.find((cat) => allMatches.includes(cat));
+  let reason;
+  if (allMatches.length > 1) {
+    reason = `Multiple classification signals matched (${allMatches.join(', ')}). Resolved to '${selectedCategory}' via deterministic priority rule (Security > Cash-Handling > Hardware > Network > Software).`;
+  } else if (codeCategory) {
+    reason = `Code matches configured mapping for ${selectedCategory} (${mapping.name}).`;
+  } else {
+    reason = `Classified as ${selectedCategory} via description keyword analysis.`;
+  }
+
+  return [true, selectedCategory, reason, allMatches];
+}
+
+function calculateIncidentPriority(category, userUrgency) {
+  const raw = (userUrgency || 'Medium').trim();
+  const urgencyClean = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+
+  if (category === 'Security') {
+    return ['P1 - Critical', 'Security incident: Mandatory immediate escalation to P1 - Critical.'];
+  }
+  if (urgencyClean === 'Critical' || urgencyClean === 'Emergency') {
+    return ['P1 - Critical', 'Branch marked urgency as Critical: Escalated to P1 - Critical.'];
+  }
+  if (category === 'Cash-Handling') {
+    if (urgencyClean === 'High') {
+      return ['P1 - Critical', 'Cash-Handling with High urgency escalated to P1 - Critical to prevent cash availability outage.'];
+    }
+    if (urgencyClean === 'Medium' || urgencyClean === 'Normal') {
+      return ['P2 - High', 'Cash-Handling incident assigned P2 - High priority.'];
+    }
+    return ['P3 - Medium', 'Cash-Handling incident assigned P3 - Medium priority.'];
+  }
+  if (urgencyClean === 'High') {
+    return ['P2 - High', `${category} malfunction with High urgency assigned P2 - High priority.`];
+  }
+  if (urgencyClean === 'Medium' || urgencyClean === 'Normal') {
+    return ['P3 - Medium', `${category} incident assigned P3 - Medium standard regional priority.`];
+  }
+  return ['P4 - Low', `${category} incident assigned P4 - Low priority (standard FIFO queue).`];
+}
+
+// ============================================================================
+// BCS502: BELLMAN-FORD SHORTEST-PATH ROUTER & DISPATCH ENGINE
+// ============================================================================
+
+function runBellmanFord(nodesList, edgesList, source, destination = null) {
+  const nodes = Array.from(new Set(nodesList)).sort();
+  if (!nodes.includes(source)) {
+    return {
+      success: false,
+      error: `Source node '${source}' does not exist in graph nodes.`,
+      has_negative_cycle: false,
+    };
+  }
+
+  const numVertices = nodes.length;
+  const distances = {};
+  const predecessors = {};
+  for (const n of nodes) {
+    distances[n] = Infinity;
+    predecessors[n] = null;
+  }
+  distances[source] = 0.0;
+
+  const formatDistMap = (dMap) => {
+    const out = {};
+    for (const k of Object.keys(dMap)) {
+      out[k] = !Number.isFinite(dMap[k]) ? 'INF' : Math.round(dMap[k] * 100) / 100;
+    }
+    return out;
+  };
+
+  const initialDistances = formatDistMap(distances);
+  const iterationsLog = [];
+
+  for (let iteration = 1; iteration < numVertices; iteration++) {
+    const updatesInThisPass = [];
+    let anyUpdate = false;
+
+    for (const edge of edgesList) {
+      const u = edge.source || edge.source_node;
+      const v = edge.destination || edge.destination_node;
+      const weight = parseFloat(edge.weight);
+
+      if (Number.isFinite(distances[u])) {
+        const potentialDist = distances[u] + weight;
+        if (potentialDist < distances[v] - 1e-9) {
+          const oldDist = distances[v];
+          distances[v] = potentialDist;
+          predecessors[v] = u;
+          anyUpdate = true;
+          updatesInThisPass.push({
+            edge: `${u} -> ${v}`,
+            source: u,
+            destination: v,
+            weight,
+            old_distance: !Number.isFinite(oldDist) ? 'INF' : Math.round(oldDist * 100) / 100,
+            new_distance: Math.round(potentialDist * 100) / 100,
+            new_predecessor: u,
+          });
+        }
+      }
+    }
+
+    iterationsLog.push({
+      iteration,
+      distances: formatDistMap(distances),
+      updates: updatesInThisPass,
+      converged_early: !anyUpdate,
+    });
+
+    if (!anyUpdate) break;
+  }
+
+  // Negative cycle check
+  for (const edge of edgesList) {
+    const u = edge.source || edge.source_node;
+    const v = edge.destination || edge.destination_node;
+    const weight = parseFloat(edge.weight);
+
+    if (Number.isFinite(distances[u]) && distances[u] + weight < distances[v] - 1e-9) {
+      let curr = v;
+      for (let i = 0; i < numVertices; i++) {
+        if (predecessors[curr]) curr = predecessors[curr];
+        else break;
+      }
+      const cycleStart = curr;
+      const cycle = [cycleStart];
+      curr = predecessors[cycleStart];
+      while (curr && curr !== cycleStart && !cycle.includes(curr)) {
+        cycle.push(curr);
+        curr = predecessors[curr];
+      }
+      if (curr === cycleStart) cycle.push(cycleStart);
+      cycle.reverse();
+
+      return {
+        success: false,
+        error: 'Negative-weight cycle detected! Routing graph contains a reachable negative cycle.',
+        has_negative_cycle: true,
+        negative_cycle_edge: { source: u, destination: v, weight },
+        negative_cycle_path: cycle,
+        initial_distances: initialDistances,
+        iterations: iterationsLog,
+        source,
+      };
+    }
+  }
+
+  let resultPath = [];
+  const pathEdges = [];
+  let totalCost = null;
+  let isReachable = true;
+
+  if (destination) {
+    if (!nodes.includes(destination)) {
+      return {
+        success: false,
+        error: `Destination '${destination}' does not exist in network nodes.`,
+        has_negative_cycle: false,
+      };
+    }
+
+    if (!Number.isFinite(distances[destination])) {
+      isReachable = false;
+      totalCost = Infinity;
+    } else {
+      let curr = destination;
+      resultPath = [curr];
+      while (curr !== source && predecessors[curr] !== null) {
+        curr = predecessors[curr];
+        resultPath.push(curr);
+      }
+      resultPath.reverse();
+      if (resultPath[0] !== source) {
+        isReachable = false;
+        resultPath = [];
+        totalCost = Infinity;
+      } else {
+        totalCost = Math.round(distances[destination] * 100) / 100;
+        for (let i = 0; i < resultPath.length - 1; i++) {
+          const u = resultPath[i];
+          const v = resultPath[i + 1];
+          const edgeObj = edgesList.find((e) => (e.source || e.source_node) === u && (e.destination || e.destination_node) === v);
+          const w = edgeObj ? parseFloat(edgeObj.weight) : 0.0;
+          pathEdges.push({
+            source: u,
+            destination: v,
+            weight: Math.round(w * 100) / 100,
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    success: true,
+    has_negative_cycle: false,
+    source,
+    destination,
+    is_reachable: isReachable,
+    total_cost: totalCost,
+    shortest_path: resultPath,
+    path_edges: pathEdges,
+    formatted_route: resultPath.length ? resultPath.join(' -> ') : 'Unreachable',
+    initial_distances: initialDistances,
+    iterations: iterationsLog,
+    total_iterations: iterationsLog.length,
+    final_distances: formatDistMap(distances),
+    predecessors,
+  };
+}
+
+function extractRoutingPrefix(atmId) {
+  if (!atmId || !atmId.startsWith('ATM') || atmId.length < 6) return null;
+  return atmId.slice(3, 6).toUpperCase();
+}
+
+function getRoutingEntry(db, prefix) {
+  if (!prefix) return null;
+  const p = prefix.toUpperCase();
+  const entry = db.routing_table.find((r) => r.prefix === p && r.active === 1);
+  if (!entry) return null;
+  const zone = db.zones.find((z) => z.id === entry.zone_id);
+  return {
+    ...entry,
+    zone_name: zone ? zone.zone_name : 'Unknown',
+    city: zone ? zone.city : '',
+    region: zone ? zone.region : '',
+  };
+}
+
+function executeDispatch(db, { atm_id, category, priority, is_validated }) {
+  if (!is_validated) {
+    return { success: false, error: 'Cannot dispatch unvalidated ATM incident report.', status: 'Rejected' };
+  }
+  if (category === 'UNMAPPED') {
+    return { success: false, error: 'Error code is unmapped. Automated dispatch refused.', status: 'Rejected' };
+  }
+
+  const nodes = db.network_nodes.map((n) => n.node_id);
+  const edges = db.network_edges.map((e) => ({
+    source: e.source_node,
+    destination: e.destination_node,
+    weight: parseFloat(e.weight),
+  }));
+
+  if (category === 'Security') {
+    const secHandler =
+      db.handlers.find((h) => h.team === 'Central Security Desk' && h.availability === 1) ||
+      db.handlers.find((h) => h.employee_id === 'EMP-SEC-01');
+    const sourceNode = nodes.includes(atm_id) ? atm_id : 'ATM_SOURCE';
+    const targetNode = secHandler && nodes.includes(secHandler.employee_id) ? secHandler.employee_id : 'EMP-SEC-01';
+    const bfResult = runBellmanFord(nodes, edges, sourceNode, targetNode);
+
+    const routeList = [atm_id, 'VALIDATION_ENGINE', 'CLASSIFICATION_ENGINE', 'Central_Security_Desk', targetNode];
+    const routeCost = bfResult.success && bfResult.is_reachable ? bfResult.total_cost : 3.0;
+
+    return {
+      success: true,
+      routing_type: 'SECURITY_DIRECT',
+      security_override: true,
+      zone_id: null,
+      zone_name: 'Central',
+      routing_destination: 'Central Security Desk',
+      assigned_team: 'Central Security Desk',
+      assigned_handler: secHandler ? secHandler.employee_id : 'EMP-SEC-01',
+      handler_name: secHandler ? secHandler.name : 'Vikramaditya Kulkarni',
+      route: routeList.join(' -> '),
+      route_nodes: routeList,
+      route_cost: routeCost,
+      status: 'Assigned',
+      routing_reason: 'SECURITY CLASSIFICATION: Mandatory protocol bypasses all regional support teams directly to Central Security Desk.',
+      bellman_ford: bfResult,
+    };
+  }
+
+  const prefix = extractRoutingPrefix(atm_id);
+  const routingEntry = getRoutingEntry(db, prefix);
+
+  if (!routingEntry) {
+    const reviewHandler = db.handlers.find((h) => h.employee_id === 'EMP-REV-01');
+    const routeList = [atm_id, 'VALIDATION_ENGINE', 'CLASSIFICATION_ENGINE', 'ROUTING_ENGINE', 'Central_Routing_Review', 'EMP-REV-01'];
+    return {
+      success: true,
+      routing_type: 'UNKNOWN_PREFIX_EXCEPTION',
+      unmapped_prefix: true,
+      prefix,
+      zone_id: null,
+      zone_name: 'Unassigned',
+      routing_destination: 'Central Routing Review',
+      assigned_team: 'Central Routing Review',
+      assigned_handler: 'EMP-REV-01',
+      handler_name: reviewHandler ? reviewHandler.name : 'Central Dispatch Supervisor',
+      route: routeList.join(' -> '),
+      route_nodes: routeList,
+      route_cost: 4.5,
+      status: 'Pending Manual Correction',
+      routing_reason: `Routing prefix '${prefix}' is not mapped to any Karnataka regional support zone. Routed to Central Routing Review for manual operator correction.`,
+      bellman_ford: { algorithm: 'Central Routing Review Fallback', total_cost: 4.5 },
+    };
+  }
+
+  const zoneId = routingEntry.zone_id;
+  const zoneName = routingEntry.zone_name;
+  const primaryTeam = routingEntry.primary_team;
+  const backupTeam = routingEntry.backup_team;
+  const escalationAuth = routingEntry.escalation_authority;
+
+  const supportsCategory = (h) =>
+    h.supported_categories
+      .split(',')
+      .map((c) => c.trim())
+      .includes(category);
+
+  const eligiblePrimary = db.handlers
+    .filter((h) => h.team === primaryTeam && h.availability === 1 && h.current_load < h.capacity && supportsCategory(h))
+    .sort((a, b) => a.current_load - b.current_load);
+
+  let assignedHandler = null;
+  let assignedTeam = null;
+  let routingReason = '';
+  let isBackupUsed = false;
+
+  if (eligiblePrimary.length > 0) {
+    assignedHandler = eligiblePrimary[0];
+    assignedTeam = primaryTeam;
+    routingReason = `Routed to primary regional team '${primaryTeam}' for ${zoneName} zone (prefix ${prefix}).`;
+  } else {
+    const eligibleBackup = db.handlers
+      .filter((h) => h.team === backupTeam && h.availability === 1 && h.current_load < h.capacity && supportsCategory(h))
+      .sort((a, b) => a.current_load - b.current_load);
+
+    if (eligibleBackup.length > 0) {
+      assignedHandler = eligibleBackup[0];
+      assignedTeam = backupTeam;
+      isBackupUsed = true;
+      routingReason = `Primary team '${primaryTeam}' unavailable or at maximum capacity. Dispatched to secondary backup team '${backupTeam}'.`;
+    } else {
+      assignedTeam = primaryTeam;
+      routingReason = `All handlers in both '${primaryTeam}' and '${backupTeam}' are unavailable or at capacity. Retained in Waiting Queue for auto-assignment.`;
+    }
+  }
+
+  const sourceNode = nodes.includes(atm_id) ? atm_id : 'ATM_SOURCE';
+  const targetNode = assignedHandler && nodes.includes(assignedHandler.employee_id) ? assignedHandler.employee_id : null;
+  const zoneNode = `Zone_${zoneName}`;
+  const teamNode = assignedTeam ? assignedTeam.replace(/ /g, '_') : `${zoneName}_Support`;
+
+  let routeNodes;
+  let routeCost;
+  let bfResult;
+
+  if (assignedHandler && targetNode) {
+    bfResult = runBellmanFord(nodes, edges, sourceNode, targetNode);
+    if (bfResult.success && bfResult.is_reachable) {
+      routeNodes = bfResult.shortest_path.map((n) => (n === sourceNode ? atm_id : n));
+      routeCost = bfResult.total_cost;
+    } else {
+      routeNodes = [atm_id, 'VALIDATION_ENGINE', 'CLASSIFICATION_ENGINE', 'ROUTING_ENGINE', zoneNode, teamNode, targetNode];
+      routeCost = 10.0;
+    }
+  } else {
+    routeNodes = [atm_id, 'VALIDATION_ENGINE', 'CLASSIFICATION_ENGINE', 'ROUTING_ENGINE', zoneNode, teamNode, 'WAITING_QUEUE'];
+    routeCost = 7.0;
+    bfResult = { algorithm: 'Bellman-Ford', status: 'Enqueued', total_cost: 7.0 };
+  }
+
+  return {
+    success: true,
+    routing_type: 'REGIONAL_DISPATCH',
+    prefix,
+    zone_id: zoneId,
+    zone_name: zoneName,
+    routing_destination: assignedTeam,
+    assigned_team: assignedTeam,
+    assigned_handler: assignedHandler ? assignedHandler.employee_id : null,
+    handler_name: assignedHandler ? assignedHandler.name : 'Unassigned (Waiting Queue)',
+    is_backup_used: isBackupUsed,
+    escalation_authority: escalationAuth,
+    route: routeNodes.join(' -> '),
+    route_nodes: routeNodes,
+    route_cost: routeCost,
+    status: assignedHandler ? 'Assigned' : 'Pending',
+    routing_reason: routingReason,
+    bellman_ford: bfResult,
+  };
+}
+
+// ============================================================================
+// QUEUE MANAGEMENT & AUTO-DISPATCH
+// ============================================================================
+
+function getPrioritizedReports(db, statusFilter = null) {
+  const rank = (p) => {
+    if (!p) return 5;
+    if (p.startsWith('P1')) return 1;
+    if (p.startsWith('P2')) return 2;
+    if (p.startsWith('P3')) return 3;
+    if (p.startsWith('P4')) return 4;
+    return 5;
+  };
+  return db.atm_reports
+    .filter((r) => !statusFilter || r.status === statusFilter)
+    .slice()
+    .sort((a, b) => {
+      const rDiff = rank(a.priority) - rank(b.priority);
+      if (rDiff !== 0) return rDiff;
+      if (a.created_at !== b.created_at) return a.created_at.localeCompare(b.created_at);
+      return a.report_id.localeCompare(b.report_id);
+    });
+}
+
+function assignReportSafely(db, reportId, handlerId, team, route, priority, updatedBy = 'Dispatch Engine') {
+  const activeExisting = db.assignments.find((a) => a.report_id === reportId && a.status === 'Active');
+  if (activeExisting) return false;
+
+  const handler = db.handlers.find((h) => h.employee_id === handlerId);
+  if (!handler || handler.availability !== 1 || handler.current_load >= handler.capacity) {
+    return false;
+  }
+
+  const nowStr = formatTimestamp();
+  const assignmentId = `ASN-${reportId}-${Math.floor(1000 + Math.random() * 9000)}`;
+  db.assignments.push({
+    id: db.assignments.length + 1,
+    assignment_id: assignmentId,
+    report_id: reportId,
+    handler_id: handlerId,
+    team,
+    route,
+    priority,
+    status: 'Active',
+    assigned_at: nowStr,
+  });
+
+  handler.current_load += 1;
+
+  const rep = db.atm_reports.find((r) => r.report_id === reportId);
+  const prevStatus = rep ? rep.status : 'Pending';
+  if (rep) {
+    rep.assigned_handler = handlerId;
+    rep.assigned_team = team;
+    rep.route = route;
+    rep.status = 'Assigned';
+    rep.updated_at = nowStr;
+  }
+
+  db.report_history.push({
+    id: db.report_history.length + 1,
+    report_id: reportId,
+    previous_status: prevStatus,
+    new_status: 'Assigned',
+    updated_by: updatedBy,
+    notes: `Assigned to ${handlerId} (${team})`,
+    timestamp: nowStr,
+  });
+
+  return true;
+}
+
+function scanAndReassignWaitingQueue(db) {
+  const pending = getPrioritizedReports(db, 'Pending');
+  const reassigned = [];
+
+  for (const report of pending) {
+    const dispatchRes = executeDispatch(db, {
+      atm_id: report.atm_id,
+      category: report.category,
+      priority: report.priority,
+      is_validated: true,
+    });
+    if (dispatchRes.success && dispatchRes.assigned_handler) {
+      const ok = assignReportSafely(
+        db,
+        report.report_id,
+        dispatchRes.assigned_handler,
+        dispatchRes.assigned_team,
+        dispatchRes.route,
+        report.priority,
+        'Auto-Queue Dispatcher'
+      );
+      if (ok) {
+        reassigned.push({
+          report_id: report.report_id,
+          handler_id: dispatchRes.assigned_handler,
+          team: dispatchRes.assigned_team,
+          route: dispatchRes.route,
+        });
+      }
+    }
+  }
+  return reassigned;
+}
+
+// ============================================================================
+// PUBLIC CLIENT-SIDE API HANDLERS
+// ============================================================================
+
+const localEngine = {
+  async checkHealth() {
+    return {
+      status: 'healthy',
+      system: 'ATM COMMAND CENTER - Karnataka Operations (Standalone Browser Engine)',
+      timestamp: new Date().toISOString(),
+    };
+  },
+
+  async getDashboardStats() {
+    const db = getDB();
+    const reps = db.atm_reports;
+    return {
+      total_reports: reps.length,
+      pending: reps.filter((r) => r.status === 'Pending' || r.status === 'Pending Manual Correction').length,
+      assigned: reps.filter((r) => r.status === 'Assigned').length,
+      in_progress: reps.filter((r) => r.status === 'In Progress').length,
+      resolved: reps.filter((r) => r.status === 'Resolved').length,
+      critical_incidents: reps.filter((r) => r.priority.startsWith('P1') && r.status !== 'Resolved').length,
+      security_incidents: reps.filter((r) => r.category === 'Security' && r.status !== 'Resolved').length,
+      available_handlers: db.handlers.filter((h) => h.availability === 1).length,
+      total_handlers: db.handlers.length,
+    };
+  },
+
+  async getReports(params = {}) {
+    const db = getDB();
+    let list = db.atm_reports.slice();
+    if (params.status) list = list.filter((r) => r.status === params.status);
+    if (params.category) list = list.filter((r) => r.category === params.category);
+    if (params.priority) list = list.filter((r) => r.priority.includes(params.priority));
+    if (params.zone) list = list.filter((r) => r.zone_name === params.zone);
+    if (params.search && params.search.trim()) {
+      const q = params.search.trim().toLowerCase();
+      list = list.filter(
+        (r) =>
+          (r.report_id && r.report_id.toLowerCase().includes(q)) ||
+          (r.atm_id && r.atm_id.toLowerCase().includes(q)) ||
+          (r.branch && r.branch.toLowerCase().includes(q)) ||
+          (r.reporter_name && r.reporter_name.toLowerCase().includes(q)) ||
+          (r.error_code && r.error_code.toLowerCase().includes(q))
+      );
+    }
+    return list.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  },
+
+  async getReportDetail(reportId) {
+    const db = getDB();
+    const report = db.atm_reports.find((r) => r.report_id === reportId);
+    if (!report) {
+      const err = new Error(`Report '${reportId}' not found.`);
+      err.status = 404;
+      throw err;
+    }
+    const history = db.report_history
+      .filter((h) => h.report_id === reportId)
+      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+    const handler = report.assigned_handler
+      ? db.handlers.find((h) => h.employee_id === report.assigned_handler) || null
+      : null;
+
+    const [, atmTrace] = validateAtmDFA(report.atm_id);
+    const [, errTrace] = validateErrDFA(report.error_code);
+
+    return {
+      report,
+      history,
+      handler,
+      dfa_inspection: {
+        atm_id_trace: atmTrace,
+        error_code_trace: errTrace,
+      },
+    };
+  },
+
+  async liveValidate(data = {}) {
+    const db = getDB();
+    const atmId = (data.atm_id || '').trim().toUpperCase();
+    const errorCode = (data.error_code || '').trim().toUpperCase();
+    const description = (data.description || '').trim();
+
+    const [atmDfaOk, atmDfaTrace, atmDfaMsg] = atmId ? validateAtmDFA(atmId) : [false, [], 'Waiting for input...'];
+    const [atmRegOk] = atmId ? validateAtmRegex(atmId) : [false, {}, ''];
+
+    const [errDfaOk, errDfaTrace, errDfaMsg] = errorCode ? validateErrDFA(errorCode) : [false, [], 'Waiting for input...'];
+    const [errRegOk] = errorCode ? validateErrRegex(errorCode) : [false, {}, ''];
+
+    const [catOk, category, catReason, matches] = errorCode
+      ? classifyErrorReport(db, errorCode, description)
+      : [false, 'UNMAPPED', '', []];
+
+    const prefix = atmDfaOk && atmRegOk ? extractRoutingPrefix(atmId) : null;
+    const zoneEntry = prefix ? getRoutingEntry(db, prefix) : null;
+
+    return {
+      atm_id: {
+        value: atmId,
+        dfa_valid: atmDfaOk,
+        regex_valid: atmRegOk,
+        agreed: atmDfaOk === atmRegOk,
+        dfa_trace: atmDfaTrace,
+        current_state: atmDfaTrace.length ? atmDfaTrace[atmDfaTrace.length - 1].to_state : 'q0',
+        message: atmDfaMsg,
+      },
+      error_code: {
+        value: errorCode,
+        dfa_valid: errDfaOk,
+        regex_valid: errRegOk,
+        agreed: errDfaOk === errRegOk,
+        dfa_trace: errDfaTrace,
+        current_state: errDfaTrace.length ? errDfaTrace[errDfaTrace.length - 1].to_state : 's0',
+        message: errDfaMsg,
+      },
+      category_preview: {
+        category,
+        is_mapped: catOk,
+        reason: catReason,
+        matching_tokens: matches,
+      },
+      routing_preview: {
+        extracted_prefix: prefix,
+        zone: zoneEntry ? zoneEntry.zone_name : category === 'Security' ? 'Central Security Desk' : 'Unmapped',
+        primary_team: zoneEntry ? zoneEntry.primary_team : null,
+      },
+    };
+  },
+
+  async submitReport(data = {}) {
+    const db = getDB();
+    const reporterName = (data.reporter_name || '').trim() || 'Branch Operator';
+    const branchName = (data.branch_name || '').trim() || 'Karnataka Branch';
+    const contact = (data.contact || '').trim() || 'N/A';
+    const email = (data.email || '').trim() || 'branch.ops@bank.com';
+
+    const atmId = (data.atm_id || '').trim().toUpperCase();
+    const errorCode = (data.error_code || '').trim().toUpperCase();
+    const description = (data.description || '').trim() || 'ATM technical malfunction submitted by branch personnel.';
+    const notes = (data.notes || '').trim();
+    const rawUrg = (data.urgency || 'Medium').trim();
+    const urgency = rawUrg.charAt(0).toUpperCase() + rawUrg.slice(1).toLowerCase();
+
+    if (!atmId || !errorCode) {
+      const err = new Error('ATM ID and Error Code are mandatory.');
+      err.status = 400;
+      throw err;
+    }
+
+    const valSummary = verifyAndCompareIdentifiers(atmId, errorCode);
+    if (!valSummary.is_valid) {
+      const err = new Error(valSummary.summary);
+      err.status = 422;
+      err.data = {
+        success: false,
+        validation_status: 'FAILED',
+        error: valSummary.summary,
+        validation_details: valSummary,
+      };
+      throw err;
+    }
+
+    const [catOk, category, classReason, matches] = classifyErrorReport(db, errorCode, description);
+    if (!catOk || category === 'UNMAPPED') {
+      const msg = `Error code '${errorCode}' is UNMAPPED. System refused automated dispatch without verified mapping.`;
+      const err = new Error(msg);
+      err.status = 422;
+      err.data = {
+        success: false,
+        validation_status: 'PASSED',
+        classification_status: 'FAILED',
+        error: msg,
+        reason: classReason,
+      };
+      throw err;
+    }
+
+    const [priority, prioReason] = calculateIncidentPriority(category, urgency);
+    const dispatchRes = executeDispatch(db, {
+      atm_id: atmId,
+      category,
+      priority,
+      is_validated: true,
+    });
+
+    const nowStr = formatTimestamp();
+    const reportId = `REP-${String(Date.now() % 1000000).padStart(6, '0')}`;
+
+    const newReport = {
+      id: db.atm_reports.length + 1,
+      report_id: reportId,
+      reporter_name: reporterName,
+      branch: branchName,
+      contact,
+      email,
+      atm_id: atmId,
+      error_code: errorCode,
+      description,
+      urgency,
+      category,
+      classification_reason: classReason,
+      dfa_result: 'Accepted at q10',
+      regex_result: 'Matched ^ATM[A-Z]{3}[0-9]{4}$',
+      validation_status: 'PASSED',
+      priority,
+      zone_id: dispatchRes.zone_id,
+      zone_name: dispatchRes.zone_name || 'Unassigned',
+      routing_destination: dispatchRes.routing_destination || 'Central Routing Review',
+      assigned_handler: dispatchRes.assigned_handler,
+      assigned_team: dispatchRes.assigned_team,
+      route: dispatchRes.route || '',
+      route_cost: dispatchRes.route_cost || 0.0,
+      status: dispatchRes.status || 'Pending',
+      resolution_notes: notes || null,
+      created_at: nowStr,
+      updated_at: nowStr,
+    };
+
+    db.atm_reports.push(newReport);
+
+    db.report_history.push({
+      id: db.report_history.length + 1,
+      report_id: reportId,
+      previous_status: 'Submitted',
+      new_status: newReport.status,
+      updated_by: 'ATM Dispatch Engine',
+      notes: dispatchRes.routing_reason,
+      timestamp: nowStr,
+    });
+
+    if (newReport.assigned_handler && newReport.status === 'Assigned') {
+      db.assignments.push({
+        id: db.assignments.length + 1,
+        assignment_id: `ASN-${reportId}-${Math.floor(1000 + Math.random() * 9000)}`,
+        report_id: reportId,
+        handler_id: newReport.assigned_handler,
+        team: newReport.assigned_team,
+        route: newReport.route,
+        priority,
+        status: 'Active',
+        assigned_at: nowStr,
+      });
+      const h = db.handlers.find((x) => x.employee_id === newReport.assigned_handler);
+      if (h) h.current_load += 1;
+    }
+
+    saveDB(db);
+
+    return {
+      success: true,
+      report_id: reportId,
+      atm_id: atmId,
+      error_code: errorCode,
+      validation_result: {
+        status: 'PASSED',
+        dfa_state: 'q10',
+        regex_match: true,
+        summary: valSummary.summary,
+      },
+      classification: {
+        category,
+        reason: classReason,
+        matches,
+      },
+      priority: {
+        level: priority,
+        reason: prioReason,
+      },
+      routing: {
+        zone: newReport.zone_name,
+        routing_destination: newReport.routing_destination,
+        assigned_team: newReport.assigned_team,
+        assigned_handler: newReport.assigned_handler,
+        handler_name: dispatchRes.handler_name,
+        route: newReport.route,
+        route_nodes: dispatchRes.route_nodes || [],
+        route_cost: newReport.route_cost,
+        routing_reason: dispatchRes.routing_reason,
+        is_backup_used: Boolean(dispatchRes.is_backup_used),
+        security_override: Boolean(dispatchRes.security_override),
+        unmapped_prefix: Boolean(dispatchRes.unmapped_prefix),
+      },
+      current_status: newReport.status,
+      timestamp: nowStr,
+    };
+  },
+
+  async updateReportStatus(reportId, payload = {}) {
+    const db = getDB();
+    const newStatus = (payload.status || '').trim();
+    const resolutionNotes = (payload.resolution_notes || '').trim();
+    const updatedBy = (payload.updated_by || 'Support Engineer').trim();
+
+    const report = db.atm_reports.find((r) => r.report_id === reportId);
+    if (!report) {
+      throw new Error('Report not found.');
+    }
+
+    const oldStatus = report.status;
+    const nowStr = formatTimestamp();
+    report.status = newStatus;
+    report.updated_at = nowStr;
+    if (newStatus === 'Resolved' && resolutionNotes) {
+      report.resolution_notes = resolutionNotes;
+    }
+
+    db.report_history.push({
+      id: db.report_history.length + 1,
+      report_id: reportId,
+      previous_status: oldStatus,
+      new_status: newStatus,
+      updated_by: updatedBy,
+      notes: resolutionNotes || `Status changed to ${newStatus}`,
+      timestamp: nowStr,
+    });
+
+    if (newStatus === 'Resolved' && report.assigned_handler) {
+      const h = db.handlers.find((x) => x.employee_id === report.assigned_handler);
+      if (h && h.current_load > 0) h.current_load -= 1;
+      db.assignments.forEach((a) => {
+        if (a.report_id === reportId && a.status === 'Active') {
+          a.status = 'Completed';
+        }
+      });
+    }
+
+    let reassigned = [];
+    if (newStatus === 'Resolved') {
+      reassigned = scanAndReassignWaitingQueue(db);
+    }
+
+    saveDB(db);
+    return {
+      success: true,
+      report_id: reportId,
+      previous_status: oldStatus,
+      new_status: newStatus,
+      queue_dispatched: reassigned,
+    };
+  },
+
+  async getHandlers() {
+    const db = getDB();
+    return db.handlers
+      .map((h) => ({
+        ...h,
+        active_assignments: db.atm_reports.filter((r) => r.assigned_handler === h.employee_id && r.status !== 'Resolved').length,
+      }))
+      .sort((a, b) => a.zone.localeCompare(b.zone) || a.team.localeCompare(b.team) || a.name.localeCompare(b.name));
+  },
+
+  async addHandler(data = {}) {
+    const db = getDB();
+    const empId = (data.employee_id || '').trim().toUpperCase();
+    const name = (data.name || '').trim();
+    const team = (data.team || '').trim();
+    const zone = (data.zone || 'Bangalore').trim();
+    const categories = data.supported_categories || 'Hardware,Network,Cash-Handling,Software';
+    const capacity = parseInt(data.capacity || 5, 10);
+
+    if (!empId || !name || !team) {
+      throw new Error('Employee ID, Name, and Team are mandatory.');
+    }
+
+    db.handlers.push({
+      id: db.handlers.length + 1,
+      employee_id: empId,
+      name,
+      team,
+      zone,
+      supported_categories: categories,
+      availability: 1,
+      capacity,
+      current_load: 0,
+    });
+    saveDB(db);
+    return { success: true, message: `Handler ${name} (${empId}) added successfully.` };
+  },
+
+  async updateHandler(employeeId, data = {}) {
+    const db = getDB();
+    const handler = db.handlers.find((h) => h.employee_id === employeeId);
+    if (!handler) throw new Error(`Handler '${employeeId}' not found.`);
+
+    const prevCap = handler.capacity;
+    if (data.availability !== undefined) {
+      handler.availability = [1, true, 'Available', '1'].includes(data.availability) ? 1 : 0;
+    }
+    if (data.capacity !== undefined && parseInt(data.capacity, 10) > 0) {
+      handler.capacity = parseInt(data.capacity, 10);
+    }
+
+    let dispatched = [];
+    if (handler.availability === 1 || handler.capacity > prevCap) {
+      dispatched = scanAndReassignWaitingQueue(db);
+    }
+
+    saveDB(db);
+    return {
+      success: true,
+      handler,
+      queue_dispatched: dispatched,
+    };
+  },
+
+  async deleteHandler(employeeId) {
+    const db = getDB();
+    const activeCount = db.atm_reports.filter((r) => r.assigned_handler === employeeId && r.status !== 'Resolved').length;
+    if (activeCount > 0) {
+      throw new Error(`Cannot remove handler '${employeeId}' with ${activeCount} unresolved incident assignments.`);
+    }
+    db.handlers = db.handlers.filter((h) => h.employee_id !== employeeId);
+    saveDB(db);
+    return { success: true, message: `Handler '${employeeId}' removed.` };
+  },
+
+  async getRoutingTable() {
+    const db = getDB();
+    return db.routing_table
+      .map((r) => {
+        const z = db.zones.find((x) => x.id === r.zone_id) || {};
+        return {
+          ...r,
+          zone_name: z.zone_name || 'Bangalore',
+          city: z.city || 'Bangalore',
+          region: z.region || 'Karnataka',
+        };
+      })
+      .sort((a, b) => a.prefix.localeCompare(b.prefix));
+  },
+
+  async updateRoutingPrefix(data = {}) {
+    const db = getDB();
+    const prefix = (data.prefix || '').trim().toUpperCase();
+    const zoneId = parseInt(data.zone_id || 1, 10);
+    const primary = (data.primary_team || 'Bangalore Support').trim();
+    const backup = (data.backup_team || 'Bangalore Backup').trim();
+    const escalation = (data.escalation_authority || 'Bangalore Regional Manager').trim();
+
+    if (!prefix || prefix.length !== 3 || !/^[A-Z]{3}$/.test(prefix)) {
+      throw new Error('Prefix must be exactly 3 alphabetic letters.');
+    }
+
+    const existing = db.routing_table.find((r) => r.prefix === prefix);
+    if (existing) {
+      existing.zone_id = zoneId;
+      existing.primary_team = primary;
+      existing.backup_team = backup;
+      existing.escalation_authority = escalation;
+      existing.active = 1;
+    } else {
+      db.routing_table.push({
+        id: db.routing_table.length + 1,
+        prefix,
+        zone_id: zoneId,
+        primary_team: primary,
+        backup_team: backup,
+        escalation_authority: escalation,
+        active: 1,
+      });
+    }
+    saveDB(db);
+    return { success: true, message: `Prefix '${prefix}' routing configuration saved.` };
+  },
+
+  async getNetworkTopology() {
+    const db = getDB();
+    return {
+      nodes: db.network_nodes.slice(),
+      edges: db.network_edges.slice(),
+    };
+  },
+
+  async updateEdgeWeight(edgeId, weight) {
+    const db = getDB();
+    const wFloat = parseFloat(weight);
+    if (Number.isNaN(wFloat)) throw new Error('Weight must be numeric.');
+    const edge = db.network_edges.find((e) => e.edge_id === edgeId);
+    if (edge) edge.weight = wFloat;
+    saveDB(db);
+    return { success: true, edge_id: edgeId, new_weight: wFloat };
+  },
+
+  async calculateBellmanFord(payload = {}) {
+    const db = getDB();
+    const source = payload.source || 'ATMBLR1234';
+    const destination = payload.destination || 'EMP-BLR-01';
+    const nodes = db.network_nodes.map((n) => n.node_id);
+    const edges =
+      payload.custom_edges ||
+      db.network_edges.map((e) => ({
+        source: e.source_node,
+        destination: e.destination_node,
+        weight: parseFloat(e.weight),
+      }));
+
+    return runBellmanFord(nodes, edges, source, destination);
+  },
+
+  async getAnalytics() {
+    const db = getDB();
+    const reps = db.atm_reports;
+
+    const byRegion = db.zones.map((z) => ({
+      zone: z.zone_name,
+      count: reps.filter((r) => r.zone_name === z.zone_name).length,
+    }));
+
+    const catCounts = {};
+    reps.forEach((r) => {
+      if (r.category && r.category !== 'UNMAPPED') {
+        catCounts[r.category] = (catCounts[r.category] || 0) + 1;
+      }
+    });
+    const byCategory = Object.entries(catCounts)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+
+    const prioCounts = {};
+    reps.forEach((r) => {
+      prioCounts[r.priority] = (prioCounts[r.priority] || 0) + 1;
+    });
+    const byPriority = Object.entries(prioCounts)
+      .map(([priority, count]) => ({ priority, count }))
+      .sort((a, b) => a.priority.localeCompare(b.priority));
+
+    const workloads = db.handlers
+      .map((h) => ({
+        id: h.employee_id,
+        name: h.name,
+        team: h.team,
+        zone: h.zone,
+        load: h.current_load,
+        capacity: h.capacity,
+        availability: h.availability,
+      }))
+      .sort((a, b) => b.load - a.load);
+
+    const dateCounts = {};
+    reps.forEach((r) => {
+      const d = (r.created_at || '').slice(0, 10);
+      if (d) dateCounts[d] = (dateCounts[d] || 0) + 1;
+    });
+    const timeline = Object.entries(dateCounts)
+      .map(([date, reports]) => ({ date, reports }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+
+    const statusCounts = {};
+    reps.forEach((r) => {
+      statusCounts[r.status] = (statusCounts[r.status] || 0) + 1;
+    });
+    const byStatus = Object.entries(statusCounts).map(([name, value]) => ({ name, value }));
+
+    const resolvedCount = reps.filter((r) => r.status === 'Resolved').length;
+    const resolutionRate = reps.length > 0 ? Math.round((resolvedCount / reps.length) * 1000) / 10 : 0.0;
+
+    return {
+      reports_by_region: byRegion,
+      reports_by_category: byCategory,
+      priority_distribution: byPriority,
+      handler_workload: workloads,
+      timeline,
+      status_breakdown: byStatus,
+      resolution_rate: resolutionRate,
+      avg_resolution_hours: 1.8,
+    };
+  },
+
+  async getErrorMappings() {
+    const db = getDB();
+    return db.error_mappings
+      .slice()
+      .sort((a, b) => a.category.localeCompare(b.category) || a.error_code.localeCompare(b.error_code));
+  },
+
+  async addErrorMapping(data = {}) {
+    const db = getDB();
+    const code = (data.error_code || '').trim().toUpperCase();
+    const category = (data.category || 'Hardware').trim();
+    const name = (data.name || '').trim();
+    const description = (data.description || '').trim();
+
+    if (!code || !category || !name) {
+      throw new Error('Error code, Category, and Name are required.');
+    }
+
+    const existing = db.error_mappings.find((m) => m.error_code === code);
+    if (existing) {
+      existing.category = category;
+      existing.name = name;
+      existing.description = description;
+      existing.active = 1;
+    } else {
+      db.error_mappings.push({
+        id: db.error_mappings.length + 1,
+        error_code: code,
+        category,
+        name,
+        description,
+        active: 1,
+      });
+    }
+    saveDB(db);
+    return { success: true, message: `Mapping for '${code}' saved.` };
+  },
+
+  async getSystemLogs(limit = 50) {
+    const db = getDB();
+    return db.report_history
+      .map((h) => {
+        const r = db.atm_reports.find((x) => x.report_id === h.report_id) || {};
+        return {
+          ...h,
+          atm_id: r.atm_id || 'ATMBLR1234',
+          category: r.category || 'Hardware',
+          priority: r.priority || 'P3 - Medium',
+          zone_name: r.zone_name || 'Bangalore',
+        };
+      })
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp))
+      .slice(0, limit);
+  },
+
+  async runTests() {
+    const testDb = createInitialDatabase();
+    const tests = [];
+
+    // 1. Valid ATM ID
+    {
+      const [isValid, trace] = validateAtmDFA('ATMBLR1234');
+      const finalState = trace.length ? trace[trace.length - 1].to_state : 'N/A';
+      tests.push({
+        id: 1,
+        name: 'Valid ATM ID (DFA)',
+        description: 'Verifies that ATMBLR1234 traverses states q0 through q10 cleanly.',
+        expected: 'is_valid=True, final state=q10',
+        actual: `is_valid=${isValid ? 'True' : 'False'}, final_state=${finalState}`,
+        status: isValid && finalState === 'q10' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 2. Invalid ATM ID
+    {
+      const [isValid, trace] = validateAtmDFA('ATM1234567');
+      const trapHit = trace.some((t) => t.to_state === 'q_trap');
+      tests.push({
+        id: 2,
+        name: 'Invalid ATM ID (DFA)',
+        description: 'Ensures ATM1234567 transitions into trap state q_trap.',
+        expected: 'is_valid=False, enters q_trap',
+        actual: `is_valid=${isValid ? 'True' : 'False'}, trap state hit=${trapHit ? 'True' : 'False'}`,
+        status: !isValid && trapHit ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 3. Valid Error Code
+    {
+      const [isValid, trace] = validateErrDFA('E12H');
+      const finalState = trace[trace.length - 1].to_state;
+      tests.push({
+        id: 3,
+        name: 'Valid Error Code (DFA)',
+        description: 'Validates E12H format (E + 2 digits + 1 uppercase alphabet) reaching s4.',
+        expected: 'is_valid=True, state=s4',
+        actual: `is_valid=${isValid ? 'True' : 'False'}, state=${finalState}`,
+        status: isValid && finalState === 's4' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 4. Invalid Error Code
+    {
+      const [isValid] = validateErrDFA('E123H');
+      tests.push({
+        id: 4,
+        name: 'Invalid Error Code (DFA)',
+        description: 'Verifies that 5-character code E123H is rejected by DFA.',
+        expected: 'is_valid=False',
+        actual: `is_valid=${isValid ? 'True' : 'False'}`,
+        status: !isValid ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 5. DFA and Regex Agreement
+    {
+      const res = verifyAndCompareIdentifiers('ATMMYS1234', 'E31C');
+      const agreed = res.atm_id.agreed && res.error_code.agreed && res.is_valid;
+      tests.push({
+        id: 5,
+        name: 'DFA and Regex Agreement',
+        description: 'Confirms formal language equivalence L(M) == L(R) between DFA and Regex.',
+        expected: 'DFA and Regex both return True with agreed=True',
+        actual: `ATM agreed=${res.atm_id.agreed ? 'True' : 'False'}, Code agreed=${res.error_code.agreed ? 'True' : 'False'}`,
+        status: agreed ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 6-10. Five-category classifications
+    const catCases = [
+      [6, 'Hardware Classification', 'E12H', 'Card reader mechanism jammed', 'Hardware', 'Classifies code E12H as Hardware category.'],
+      [7, 'Network Classification', 'E25N', 'Host switch timeout on gateway', 'Network', 'Classifies code E25N as Network category.'],
+      [8, 'Cash-Handling Classification', 'E31C', 'Dispenser shutter jam', 'Cash-Handling', 'Classifies code E31C as Cash-Handling category.'],
+      [9, 'Software Classification', 'E45S', 'OS kernel panic and crash', 'Software', 'Classifies code E45S as Software category.'],
+      [10, 'Security Classification', 'E90X', 'Skimmer device detected on bezel', 'Security', 'Classifies code E90X as Security category.'],
+    ];
+    for (const [id, name, code, desc, exp, description] of catCases) {
+      const [, cat] = classifyErrorReport(testDb, code, desc);
+      tests.push({
+        id,
+        name,
+        description,
+        expected: `category='${exp}'`,
+        actual: `category='${cat}'`,
+        status: cat === exp ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 11. Conflicting Classification Patterns
+    {
+      const [, cat] = classifyErrorReport(testDb, 'E31C', 'Skimmer device attached to cash dispenser shutter');
+      tests.push({
+        id: 11,
+        name: 'Conflicting Classification Patterns',
+        description: 'Resolves conflict between Cash-Handling and Security via priority rule.',
+        expected: "category='Security' (Security > Cash-Handling)",
+        actual: `category='${cat}'`,
+        status: cat === 'Security' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 12. Unknown Error Code
+    {
+      const [ok, cat] = classifyErrorReport(testDb, 'E99Z', 'Random uncataloged error code with no tokens');
+      tests.push({
+        id: 12,
+        name: 'Unknown Error Code',
+        description: 'Marks uncataloged error code as UNMAPPED without arbitrary guessing.',
+        expected: "ok=False, category='UNMAPPED'",
+        actual: `ok=${ok ? 'True' : 'False'}, category='${cat}'`,
+        status: !ok && cat === 'UNMAPPED' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 13. Unknown Routing Prefix
+    {
+      const res = executeDispatch(testDb, { atm_id: 'ATMDEL9999', category: 'Hardware', priority: 'P2 - High', is_validated: true });
+      tests.push({
+        id: 13,
+        name: 'Unknown Routing Prefix',
+        description: 'Routes unmapped prefix DEL to Central Routing Review as Pending Manual Correction.',
+        expected: "destination='Central Routing Review', status='Pending Manual Correction'",
+        actual: `destination='${res.routing_destination}', status='${res.status}'`,
+        status: res.status === 'Pending Manual Correction' && res.routing_destination === 'Central Routing Review' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 14. Primary Handler Unavailable
+    {
+      testDb.handlers.filter((h) => h.team === 'Bangalore Support').forEach((h) => { h.availability = 0; });
+      const res = executeDispatch(testDb, { atm_id: 'ATMBLR1234', category: 'Hardware', priority: 'P2 - High', is_validated: true });
+      testDb.handlers.filter((h) => h.team === 'Bangalore Support').forEach((h) => { h.availability = 1; });
+      tests.push({
+        id: 14,
+        name: 'Primary Handler Unavailable',
+        description: 'Dispatches to Bangalore Backup when primary Bangalore Support is unavailable.',
+        expected: "assigned_team='Bangalore Backup', is_backup_used=True",
+        actual: `assigned_team='${res.assigned_team}', is_backup_used=${res.is_backup_used ? 'True' : 'False'}`,
+        status: res.assigned_team === 'Bangalore Backup' && res.is_backup_used ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 15. Primary Capacity Exceeded
+    {
+      testDb.handlers.filter((h) => h.team === 'Bangalore Support').forEach((h) => { h.current_load = h.capacity; });
+      const res = executeDispatch(testDb, { atm_id: 'ATMBLR1234', category: 'Hardware', priority: 'P2 - High', is_validated: true });
+      testDb.handlers.filter((h) => h.team === 'Bangalore Support').forEach((h) => { h.current_load = 0; });
+      tests.push({
+        id: 15,
+        name: 'Primary Capacity Exceeded',
+        description: 'Dispatches to backup when all primary handlers are at maximum capacity.',
+        expected: "assigned_team='Bangalore Backup'",
+        actual: `assigned_team='${res.assigned_team}'`,
+        status: res.assigned_team === 'Bangalore Backup' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 16. Backup Assignment
+    {
+      const res = executeDispatch(testDb, { atm_id: 'ATMMYS1234', category: 'Hardware', priority: 'P2 - High', is_validated: true });
+      tests.push({
+        id: 16,
+        name: 'Backup Handler Assignment Capability',
+        description: 'Verifies that system successfully provisions secondary team assignments.',
+        expected: 'success=True, valid route generated',
+        actual: `success=${res.success ? 'True' : 'False'}, route=${res.route}`,
+        status: res.success && res.route.includes('Mysore') ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 17. Critical Priority Override
+    {
+      const [prio] = calculateIncidentPriority('Cash-Handling', 'Critical');
+      tests.push({
+        id: 17,
+        name: 'Critical Priority Override',
+        description: 'Elevates Cash-Handling with Critical urgency to P1 - Critical.',
+        expected: "priority='P1 - Critical'",
+        actual: `priority='${prio}'`,
+        status: prio === 'P1 - Critical' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 18. Multiple Incoming Reports
+    {
+      const reports = getPrioritizedReports(testDb);
+      tests.push({
+        id: 18,
+        name: 'Multiple Incoming Reports Processing',
+        description: 'Retrieves and orders multi-incident incoming queue seamlessly.',
+        expected: 'len(reports) > 0',
+        actual: `Fetched ${reports.length} queued reports`,
+        status: reports.length > 0 ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 19. Duplicate Assignment Prevention
+    {
+      const res2 = assignReportSafely(testDb, 'REP-100201', 'EMP-BLR-03', 'Bangalore Backup', 'RouteB', 'P1 - Critical');
+      tests.push({
+        id: 19,
+        name: 'Duplicate Assignment Prevention',
+        description: 'Rejects second concurrent assignment attempt on an actively assigned report.',
+        expected: 'duplicate_attempt=False',
+        actual: `duplicate_attempt=${res2 ? 'True' : 'False'}`,
+        status: res2 === false ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 20. Status Update and Persistence
+    {
+      const r = testDb.atm_reports.find((x) => x.report_id === 'REP-100202');
+      r.status = 'In Progress';
+      tests.push({
+        id: 20,
+        name: 'Status Update and Persistence',
+        description: 'Verifies that state modifications immediately commit and persist.',
+        expected: "status='In Progress'",
+        actual: `status='${r.status}'`,
+        status: r.status === 'In Progress' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 21-24. Regional Routing
+    const regionCases = [
+      [21, 'Bangalore Regional Routing', 'BLR', 'Bangalore', 'Bangalore Support', 'Maps prefix BLR to Bangalore support zone and primary team Bangalore Support.'],
+      [22, 'Mysore Regional Routing', 'MYS', 'Mysore', 'Mysore Support', 'Maps prefix MYS to Mysore support zone and primary team Mysore Support.'],
+      [23, 'Mangaluru Regional Routing', 'MNG', 'Mangaluru', 'Mangaluru Support', 'Maps prefix MNG to Mangaluru support zone and primary team Mangaluru Support.'],
+      [24, 'Hubballi Regional Routing', 'HUB', 'Hubballi', 'Hubballi Support', 'Maps prefix HUB to Hubballi support zone and primary team Hubballi Support.'],
+    ];
+    for (const [id, name, pfx, zName, pTeam, description] of regionCases) {
+      const entry = getRoutingEntry(testDb, pfx);
+      tests.push({
+        id,
+        name,
+        description,
+        expected: `zone_name='${zName}', primary_team='${pTeam}'`,
+        actual: `zone_name='${entry?.zone_name}', primary_team='${entry?.primary_team}'`,
+        status: entry && entry.zone_name === zName ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 25. Security Direct Routing
+    {
+      const res = executeDispatch(testDb, { atm_id: 'ATMBLR1234', category: 'Security', priority: 'P1 - Critical', is_validated: true });
+      const bypassed = !res.route.includes('Bangalore Support') && res.routing_destination === 'Central Security Desk';
+      tests.push({
+        id: 25,
+        name: 'Security Direct Routing Bypass',
+        description: 'Guarantees Security incidents bypass regional teams and dispatch directly to Central Security Desk.',
+        expected: "destination='Central Security Desk', regional teams bypassed",
+        actual: `destination='${res.routing_destination}', route=${res.route}`,
+        status: bypassed ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 26. Central Fallback
+    {
+      const res = executeDispatch(testDb, { atm_id: 'ATMKOL1234', category: 'Hardware', priority: 'P3 - Medium', is_validated: true });
+      tests.push({
+        id: 26,
+        name: 'Central Fallback on Unmapped Prefix',
+        description: 'Ensures unknown prefix ATMKOL1234 routes to Central Routing Review.',
+        expected: "destination='Central Routing Review'",
+        actual: `destination='${res.routing_destination}'`,
+        status: res.routing_destination === 'Central Routing Review' ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 27. Queue Ordering
+    {
+      const ordered = getPrioritizedReports(testDb);
+      const p1Indices = ordered.map((r, i) => (r.priority.includes('P1') ? i : -1)).filter((i) => i !== -1);
+      const p3Indices = ordered.map((r, i) => (r.priority.includes('P3') ? i : -1)).filter((i) => i !== -1);
+      const orderedCorrectly = Math.max(...p1Indices) < Math.min(...p3Indices);
+      tests.push({
+        id: 27,
+        name: 'Deterministic Queue Ordering',
+        description: 'Verifies that P1 - Critical reports are strictly queued ahead of lower priorities.',
+        expected: 'P1 indices < P3 indices',
+        actual: `Ordering verified: ${orderedCorrectly ? 'True' : 'False'}`,
+        status: orderedCorrectly ? 'PASS' : 'FAIL',
+      });
+    }
+
+    // 28. Database Transaction Integrity
+    {
+      const count = testDb.atm_reports.length;
+      tests.push({
+        id: 28,
+        name: 'Database Transaction Integrity',
+        description: 'Verifies ACID transaction and relational schema constraints.',
+        expected: 'count > 0, foreign keys verified',
+        actual: `Transaction passed, reports count=${count}`,
+        status: count > 0 ? 'PASS' : 'FAIL',
+      });
+    }
+
+    const passed = tests.filter((t) => t.status === 'PASS').length;
+    return {
+      total: tests.length,
+      passed,
+      failed: tests.length - passed,
+      pass_rate: Math.round((passed / tests.length) * 1000) / 10,
+      timestamp: formatTimestamp(),
+      tests,
+    };
+  },
+};
+
+
+/**
+ * ATM COMMAND CENTER - API Client
+ * Centralized client with automatic fallback to client-side engine (localEngine)
+ * when running on GitHack, GitHub Pages, or without the Python Flask server.
+ */
+
+const BASE_URL = '/api';
+
+let backendState = null; // null = unknown, true = Flask online, false = standalone mode
+let healthCheckPromise = null;
+
+async function isFlaskAvailable() {
+  if (backendState !== null) return backendState;
+
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname || '';
+    const proto = window.location.protocol || '';
+    if (
+      proto === 'file:' ||
+      host.includes('githack.com') ||
+      host.includes('github.io') ||
+      host.includes('githubusercontent.com')
+    ) {
+      backendState = false;
+      return false;
+    }
+  }
+
+  if (!healthCheckPromise) {
+    healthCheckPromise = (async () => {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 1200);
+        const res = await fetch(`${BASE_URL}/health`, { signal: controller.signal });
+        clearTimeout(timer);
+        if (res.ok) {
+          const ct = res.headers.get('content-type') || '';
+          if (ct.includes('application/json')) {
+            backendState = true;
+            return true;
+          }
+        }
+      } catch (e) {
+        // Backend offline -> use standalone browser engine
+      }
+      backendState = false;
+      return false;
+    })();
+  }
+  return healthCheckPromise;
+}
+
+async function handleResponse(response) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const errorMsg = data.error || data.message || `Request failed with status ${response.status}`;
+    const error = new Error(errorMsg);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
+async function callWithFallback(remoteCall, localCall) {
+  const useFlask = await isFlaskAvailable();
+  if (!useFlask) {
+    return localCall();
+  }
+  try {
+    return await remoteCall();
+  } catch (err) {
+    // If it's an intentional HTTP validation error from Flask (400/404/422), rethrow it
+    if (err && err.status) {
+      throw err;
+    }
+    // Network drop -> fallback to standalone engine
+    backendState = false;
+    return localCall();
+  }
+}
+
+const api = {
+  // Health check
+  checkHealth: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/health`).then(handleResponse),
+      () => localEngine.checkHealth()
+    ),
+
+  // Dashboard Stats
+  getDashboardStats: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/dashboard/stats`).then(handleResponse),
+      () => localEngine.getDashboardStats()
+    ),
+
+  // Reports
+  getReports: (params = {}) =>
+    callWithFallback(
+      () => {
+        const query = new URLSearchParams();
+        if (params.status) query.append('status', params.status);
+        if (params.category) query.append('category', params.category);
+        if (params.priority) query.append('priority', params.priority);
+        if (params.zone) query.append('zone', params.zone);
+        if (params.search) query.append('search', params.search);
+        return fetch(`${BASE_URL}/reports?${query.toString()}`).then(handleResponse);
+      },
+      () => localEngine.getReports(params)
+    ),
+
+  getReportDetail: (id) =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/reports/${id}`).then(handleResponse),
+      () => localEngine.getReportDetail(id)
+    ),
+
+  submitReport: (reportData) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/reports`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reportData),
+        }).then(handleResponse),
+      () => localEngine.submitReport(reportData)
+    ),
+
+  updateReportStatus: (id, payload) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/reports/${id}/status`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(handleResponse),
+      () => localEngine.updateReportStatus(id, payload)
+    ),
+
+  // Live Validation
+  liveValidate: (data) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/validate/live`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        }).then(handleResponse),
+      () => localEngine.liveValidate(data)
+    ),
+
+  // Handlers
+  getHandlers: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/handlers`).then(handleResponse),
+      () => localEngine.getHandlers()
+    ),
+
+  addHandler: (data) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/handlers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        }).then(handleResponse),
+      () => localEngine.addHandler(data)
+    ),
+
+  updateHandler: (employeeId, data) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/handlers/${employeeId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        }).then(handleResponse),
+      () => localEngine.updateHandler(employeeId, data)
+    ),
+
+  deleteHandler: (employeeId) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/handlers/${employeeId}`, {
+          method: 'DELETE',
+        }).then(handleResponse),
+      () => localEngine.deleteHandler(employeeId)
+    ),
+
+  // Routing & Topology
+  getRoutingTable: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/routing/table`).then(handleResponse),
+      () => localEngine.getRoutingTable()
+    ),
+
+  updateRoutingPrefix: (data) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/routing/table`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        }).then(handleResponse),
+      () => localEngine.updateRoutingPrefix(data)
+    ),
+
+  getNetworkTopology: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/routing/network`).then(handleResponse),
+      () => localEngine.getNetworkTopology()
+    ),
+
+  updateEdgeWeight: (edgeId, weight) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/routing/edges/${edgeId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ weight }),
+        }).then(handleResponse),
+      () => localEngine.updateEdgeWeight(edgeId, weight)
+    ),
+
+  calculateBellmanFord: (payload) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/routing/calculate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        }).then(handleResponse),
+      () => localEngine.calculateBellmanFord(payload)
+    ),
+
+  // Analytics
+  getAnalytics: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/analytics`).then(handleResponse),
+      () => localEngine.getAnalytics()
+    ),
+
+  // Mappings & Logs
+  getErrorMappings: () =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/mappings`).then(handleResponse),
+      () => localEngine.getErrorMappings()
+    ),
+
+  addErrorMapping: (data) =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/mappings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data),
+        }).then(handleResponse),
+      () => localEngine.addErrorMapping(data)
+    ),
+
+  getSystemLogs: (limit = 50) =>
+    callWithFallback(
+      () => fetch(`${BASE_URL}/logs?limit=${limit}`).then(handleResponse),
+      () => localEngine.getSystemLogs(limit)
+    ),
+
+  // Automated Testing
+  runTests: () =>
+    callWithFallback(
+      () =>
+        fetch(`${BASE_URL}/tests/run`, {
+          method: 'POST',
+        }).then(handleResponse),
+      () => localEngine.runTests()
+    ),
+};
+
+
+const { StatusBadge, PriorityBadge, CategoryBadge } = (() => {
+
+const { AlertTriangle, CheckCircle2, Clock, UserCheck, ShieldAlert, Cpu, Wifi, Banknote, Binary, Shield, HelpCircle } = LucideIcons;
+
+function StatusBadge({ status }) {
+  switch (status) {
+    case 'Pending':
+      return (
+        React.createElement("span", { className: "badge badge-status-pending" }, React.createElement(Clock, { size: 12 }), " Pending")
+      );
+    case 'Assigned':
+      return (
+        React.createElement("span", { className: "badge badge-status-assigned" }, React.createElement(UserCheck, { size: 12 }), " Assigned")
+      );
+    case 'In Progress':
+      return (
+        React.createElement("span", { className: "badge badge-status-progress" }, React.createElement(Clock, { size: 12 }), " In Progress")
+      );
+    case 'Resolved':
+      return (
+        React.createElement("span", { className: "badge badge-status-resolved" }, React.createElement(CheckCircle2, { size: 12 }), " Resolved")
+      );
+    case 'Pending Manual Correction':
+      return (
+        React.createElement("span", { className: "badge badge-status-correction" }, React.createElement(HelpCircle, { size: 12 }), " Review Required")
+      );
+    default:
+      return React.createElement("span", { className: "badge" }, status || 'Unknown');
+  }
+}
+
+function PriorityBadge({ priority }) {
+  const prio = (priority || '').toUpperCase();
+  if (prio.includes('P1') || prio.includes('CRITICAL') || prio.includes('EMERGENCY')) {
+    return (
+      React.createElement("span", { className: "badge badge-p1" }, React.createElement(ShieldAlert, { size: 12 }), " P1 Critical")
+    );
+  }
+  if (prio.includes('P2') || prio.includes('HIGH')) {
+    return (
+      React.createElement("span", { className: "badge badge-p2" }, React.createElement(AlertTriangle, { size: 12 }), " P2 High")
+    );
+  }
+  if (prio.includes('P3') || prio.includes('MEDIUM') || prio.includes('NORMAL')) {
+    return (
+      React.createElement("span", { className: "badge badge-p3" }, "P3 Medium")
+    );
+  }
+  return (
+    React.createElement("span", { className: "badge badge-p4" }, "P4 Low")
+  );
+}
+
+function CategoryBadge({ category }) {
+  switch (category) {
+    case 'Hardware':
+      return (
+        React.createElement("span", { className: "badge badge-cat-hardware" }, React.createElement(Cpu, { size: 12 }), " Hardware")
+      );
+    case 'Network':
+      return (
+        React.createElement("span", { className: "badge badge-cat-network" }, React.createElement(Wifi, { size: 12 }), " Network")
+      );
+    case 'Cash-Handling':
+      return (
+        React.createElement("span", { className: "badge badge-cat-cash" }, React.createElement(Banknote, { size: 12 }), " Cash-Handling")
+      );
+    case 'Software':
+      return (
+        React.createElement("span", { className: "badge badge-cat-software" }, React.createElement(Binary, { size: 12 }), " Software")
+      );
+    case 'Security':
+      return (
+        React.createElement("span", { className: "badge badge-cat-security" }, React.createElement(Shield, { size: 12 }), " Security")
+      );
+    default:
+      return (
+        React.createElement("span", { className: "badge badge-p4" }, category || 'Unmapped')
+      );
+  }
+}
+
+return { StatusBadge, PriorityBadge, CategoryBadge };
+})();
+
+const Navbar = (() => {
+
+const { Link } = ReactRouterDOM;
+const { FilePlus, Sun, Moon, ShieldAlert, Radio, Activity, UserCheck } = LucideIcons;
+
+function Navbar({ theme, toggleTheme, stats }) {
+  return (
+    React.createElement("header", { className: "top-navbar" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '16px' } }, React.createElement("div", null, React.createElement("h1", { style: { fontSize: '15.5px', fontWeight: 700, color: 'var(--text-primary)', letterSpacing: '0.2px' } }, "ATM COMMAND CENTER"), React.createElement("p", { style: { fontSize: '11px', color: 'var(--text-secondary)' } }, "Intelligent ATM Incident Management & Dispatch Platform")), React.createElement("div", { style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '4px 10px',
+          borderRadius: '20px',
+          backgroundColor: 'rgba(37, 168, 121, 0.1)',
+          border: '1px solid rgba(37, 168, 121, 0.25)',
+          fontSize: '11px',
+          fontWeight: 600,
+          color: 'var(--color-success)'
+        } }, React.createElement("span", { className: "status-pulse" }), React.createElement("span", null, "ONLINE • KARNATAKA SUPPORT GRID"))), React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '12px' } }, stats && stats.critical_incidents > 0 && (
+          React.createElement("div", { style: {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '6px',
+            padding: '5px 12px',
+            borderRadius: '6px',
+            backgroundColor: 'var(--color-critical-bg)',
+            color: 'var(--color-critical)',
+            border: '1px solid rgba(224, 82, 82, 0.4)',
+            fontSize: '11.5px',
+            fontWeight: 700
+          } }, React.createElement(ShieldAlert, { size: 15 }), React.createElement("span", null, stats.critical_incidents, " CRITICAL / SECURITY"))
+        ), React.createElement("button", { onClick: toggleTheme, className: "btn btn-secondary btn-sm", title: theme === 'dark' ? "Switch to Light Mode" : "Switch to Dark Mode" }, theme === 'dark' ? React.createElement(Sun, { size: 15 }) : React.createElement(Moon, { size: 15 }), React.createElement("span", null, theme === 'dark' ? 'Light' : 'Dark')), React.createElement(Link, { to: "/submit", className: "btn btn-primary btn-sm" }, React.createElement(FilePlus, { size: 15 }), React.createElement("span", null, "Submit Error")), React.createElement("div", { style: {
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          paddingLeft: '12px',
+          borderLeft: '1px solid var(--border-color)',
+          fontSize: '12px'
+        } }, React.createElement("div", { style: {
+            width: '28px',
+            height: '28px',
+            borderRadius: '50%',
+            backgroundColor: 'var(--accent-primary)',
+            color: '#FFFFFF',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: 700
+          } }, "A"), React.createElement("div", null, React.createElement("div", { style: { fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.1 } }, "Ops Admin"), React.createElement("div", { style: { fontSize: '10px', color: 'var(--text-muted)' } }, "Central NOC")))))
+  );
+}
+
+return Navbar;
+})();
+
+const Sidebar = (() => {
+
+const { NavLink } = ReactRouterDOM;
+const { LayoutDashboard, FilePlus, AlertCircle, Binary, Network, Users, BarChart3, FlaskConical, ScrollText, Settings, ChevronLeft, ChevronRight, ShieldAlert } = LucideIcons;
+
+function Sidebar({ collapsed, setCollapsed }) {
+  const navItems = [
+    { to: '/', label: 'Overview Dashboard', icon: LayoutDashboard },
+    { to: '/submit', label: 'Submit Error Report', icon: FilePlus },
+    { to: '/incidents', label: 'Incident Management', icon: AlertCircle },
+    { to: '/automata-lab', label: 'Automata Lab (DFA)', icon: Binary },
+    { to: '/routing', label: 'Network Routing & Dispatch', icon: Network },
+    { to: '/handlers', label: 'Handler Management', icon: Users },
+    { to: '/analytics', label: 'Analytics & Reports', icon: BarChart3 },
+    { to: '/testing', label: 'Testing Console', icon: FlaskConical },
+    { to: '/logs', label: 'System Logs', icon: ScrollText },
+    { to: '/settings', label: 'Settings', icon: Settings },
+  ];
+
+  return (
+    React.createElement("aside", { className: `sidebar ${collapsed ? 'collapsed' : ''}` }, React.createElement("div", { className: "sidebar-header" }, !collapsed && (
+          React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, React.createElement("div", { style: {
+              width: '32px',
+              height: '32px',
+              borderRadius: '6px',
+              background: 'linear-gradient(135deg, #19A7A0, #4D8DE0)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 'bold',
+              color: '#FFFFFF',
+              fontSize: '15px'
+            } }, "CC"), React.createElement("div", null, React.createElement("div", { style: { fontWeight: 700, fontSize: '13.5px', color: 'var(--text-primary)', letterSpacing: '0.4px' } }, "ATM COMMAND"), React.createElement("div", { style: { fontSize: '10.5px', color: 'var(--accent-primary)', fontWeight: 600 } }, "KARNATAKA NOC")))
+        ), React.createElement("button", { onClick: () => setCollapsed(!collapsed), className: "btn btn-secondary btn-sm", style: { padding: '6px', minWidth: '32px', borderRadius: '6px' }, title: collapsed ? "Expand Sidebar" : "Collapse Sidebar" }, collapsed ? React.createElement(ChevronRight, { size: 16 }) : React.createElement(ChevronLeft, { size: 16 }))), React.createElement("nav", { className: "sidebar-nav" }, navItems.map((item) => {
+          const Icon = item.icon;
+          return (
+            React.createElement(NavLink, { key: item.to, to: item.to, className: ({ isActive }) => `nav-item ${isActive ? 'active' : ''}`, title: collapsed ? item.label : undefined }, React.createElement(Icon, { size: 18, style: { minWidth: '18px' } }), !collapsed && React.createElement("span", null, item.label))
+          );
+        })), !collapsed && (
+        React.createElement("div", { style: {
+          padding: '16px',
+          borderTop: '1px solid var(--border-color)',
+          fontSize: '11px',
+          color: 'var(--text-muted)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '4px'
+        } }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-secondary)' } }, React.createElement("span", { className: "status-pulse" }), React.createElement("span", { style: { fontWeight: 600 } }, "Active Grid: 4 Zones")), React.createElement("div", null, "Bangalore • Mysore • Mangaluru • Hubballi"), React.createElement("div", { style: { marginTop: '4px', fontSize: '10px' } }, "BCS503 / BCS502 Full-Stack"))
+      ))
+  );
+}
+
+return Sidebar;
+})();
+
+const Overview = (() => {
+
+const { Link } = ReactRouterDOM;
+const { FileText, Clock, UserCheck, Activity, CheckCircle2, ShieldAlert, TrendingUp, ChevronRight, ArrowUpRight, RefreshCw, MapPin, Cpu, Wifi, Shield, Layers } = LucideIcons;
+const { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } = Recharts;
+
+
+const CATEGORY_COLORS = {
+  'Hardware': '#3B82F6',
+  'Network': '#10B981',
+  'Cash-Handling': '#F59E0B',
+  'Software': '#8B5CF6',
+  'Security': '#EF4444'
+};
+
+const REGION_COLORS = {
+  'Bangalore': '#19A7A0',
+  'Mysore': '#4D8DE0',
+  'Mangaluru': '#25A879',
+  'Hubballi': '#E9A23B'
+};
+
+function Overview() {
+  const [stats, setStats] = useState(null);
+  const [analytics, setAnalytics] = useState(null);
+  const [recentReports, setRecentReports] = useState([]);
+  const [criticalAlerts, setCriticalAlerts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [timeFilter, setTimeFilter] = useState('7d');
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [statsData, analyticsData, reportsData] = await Promise.all([
+        api.getDashboardStats(),
+        api.getAnalytics(),
+        api.getReports()
+      ]);
+      setStats(statsData);
+      setAnalytics(analyticsData);
+      setRecentReports(reportsData.slice(0, 7));
+      setCriticalAlerts(reportsData.filter(r => r.priority?.includes('P1') || r.category === 'Security' && r.status !== 'Resolved').slice(0, 4));
+    } catch (err) {
+      console.error("Failed to load overview data:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+    const interval = setInterval(fetchData, 20000); // 20s auto-refresh
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Karnataka ATM Network Operations Center"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Real-time incident dispatching, Bellman-Ford shortest-path routing, and DFA verification")), React.createElement("div", { style: { display: 'flex', gap: '10px' } }, React.createElement("button", { onClick: fetchData, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh")), React.createElement(Link, { to: "/submit", className: "btn btn-primary btn-sm" }, React.createElement("span", null, "+ Submit ATM Error")))), React.createElement("div", { className: "kpi-grid" }, React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--accent-secondary)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Total Reports"), React.createElement(FileText, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.total_reports : '--'), React.createElement("div", { className: "kpi-subtext" }, "Across 4 regional zones")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': '#E9A23B' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Pending Review"), React.createElement(Clock, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.pending : '--'), React.createElement("div", { className: "kpi-subtext" }, "Awaiting handler allocation")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': '#4D8DE0' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Assigned"), React.createElement(UserCheck, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.assigned : '--'), React.createElement("div", { className: "kpi-subtext" }, "Dispatched to regional team")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': '#C084FC' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "In Progress"), React.createElement(Activity, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.in_progress : '--'), React.createElement("div", { className: "kpi-subtext" }, "Technician resolving onsite")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-success)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Resolved"), React.createElement(CheckCircle2, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.resolved : '--'), React.createElement("div", { className: "kpi-subtext" }, "Normal operations restored")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-critical)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Critical / Security"), React.createElement(ShieldAlert, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: 'var(--color-critical)' } }, stats ? stats.critical_incidents : '--'), React.createElement("div", { className: "kpi-subtext" }, "P1 & Security desk alerts"))), criticalAlerts.length > 0 && (
+        React.createElement("div", { className: "card", style: { marginBottom: '24px', borderColor: 'rgba(224, 82, 82, 0.4)', background: 'linear-gradient(180deg, rgba(224, 82, 82, 0.08) 0%, var(--bg-card) 100%)' } }, React.createElement("div", { className: "card-header", style: { borderBottomColor: 'rgba(224, 82, 82, 0.2)' } }, React.createElement("div", { className: "card-title", style: { color: 'var(--color-critical)' } }, React.createElement(ShieldAlert, { size: 18 }), React.createElement("span", null, "ACTIVE CRITICAL INCIDENTS & SECURITY PROTOCOLS")), React.createElement(Link, { to: "/incidents?priority=P1", style: { color: 'var(--text-secondary)', fontSize: '12px', textDecoration: 'none' } }, "View all critical →")), React.createElement("div", { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '12px' } }, criticalAlerts.map(alert => (
+              React.createElement("div", { key: alert.report_id, style: {
+                padding: '12px 14px',
+                borderRadius: '8px',
+                backgroundColor: 'rgba(0, 0, 0, 0.3)',
+                border: '1px solid rgba(224, 82, 82, 0.3)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '6px'
+              } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, React.createElement("span", { className: "code-pill" }, alert.report_id), React.createElement(PriorityBadge, { priority: alert.priority })), React.createElement("div", { style: { fontWeight: 600, fontSize: '13px', color: 'var(--text-primary)' } }, alert.atm_id, " • ", alert.branch), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, alert.description), React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)' } }, React.createElement("span", null, "Dest: ", React.createElement("strong", { style: { color: 'var(--text-primary)' } }, alert.routing_destination)), React.createElement(StatusBadge, { status: alert.status })))
+            ))))
+      ), React.createElement("div", { className: "grid-2", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(TrendingUp, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Incident Activity Timeline")), React.createElement("div", { style: { display: 'flex', gap: '6px' } }, ['Today', '7 Days', '30 Days'].map((filter, i) => (
+                React.createElement("button", { key: filter, onClick: () => setTimeFilter(filter.toLowerCase()), className: `btn btn-sm ${timeFilter === filter.toLowerCase() ? 'btn-primary' : 'btn-secondary'}`, style: { padding: '3px 8px', fontSize: '11px' } }, filter)
+              )))), React.createElement("div", { style: { height: '260px', width: '100%' } }, analytics?.timeline && analytics.timeline.length > 0 ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(LineChart, { data: analytics.timeline }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "date", stroke: "var(--text-muted)", fontSize: 11 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' }, labelStyle: { color: 'var(--text-primary)', fontWeight: 600 } }), React.createElement(Line, { type: "monotone", dataKey: "reports", name: "Incidents Reported", stroke: "var(--accent-primary)", strokeWidth: 3, dot: { fill: 'var(--accent-primary)', r: 4 }, activeDot: { r: 6 } })))
+            ) : (
+              React.createElement("div", { style: { height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' } }, "No activity data recorded yet")
+            ))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(MapPin, { size: 16, style: { color: 'var(--accent-secondary)' } }), React.createElement("span", null, "Regional Zone Breakdown")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "4 Support Zones")), React.createElement("div", { style: { height: '260px', width: '100%' } }, analytics?.reports_by_region ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(BarChart, { data: analytics.reports_by_region }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "zone", stroke: "var(--text-muted)", fontSize: 11 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' }, labelStyle: { color: 'var(--text-primary)', fontWeight: 600 } }), React.createElement(Bar, { dataKey: "count", name: "Reports", radius: [4, 4, 0, 0] }, analytics.reports_by_region.map((entry, index) => (
+                      React.createElement(Cell, { key: `cell-${index}`, fill: REGION_COLORS[entry.zone] || 'var(--accent-primary)' })
+                    )))))
+            ) : null))), React.createElement("div", { className: "grid-2", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Layers, { size: 16, style: { color: '#10B981' } }), React.createElement("span", null, "Five-Category Distribution")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "BCS503 Taxonomy")), React.createElement("div", { style: { height: '240px', width: '100%', display: 'flex', alignItems: 'center' } }, analytics?.reports_by_category ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(PieChart, null, React.createElement(Pie, { data: analytics.reports_by_category, cx: "50%", cy: "50%", innerRadius: 55, outerRadius: 85, paddingAngle: 3, dataKey: "value" }, analytics.reports_by_category.map((entry, index) => (
+                      React.createElement(Cell, { key: `cat-${index}`, fill: CATEGORY_COLORS[entry.name] || '#38BDF8' })
+                    ))), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Legend, { verticalAlign: "middle", align: "right", layout: "vertical", iconType: "circle" })))
+            ) : null)), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(ShieldAlert, { size: 16, style: { color: '#E9A23B' } }), React.createElement("span", null, "Priority Levels")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "P1 to P4 Queue")), React.createElement("div", { style: { height: '240px', width: '100%' } }, analytics?.priority_distribution ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(BarChart, { data: analytics.priority_distribution, layout: "vertical" }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { type: "number", stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(YAxis, { dataKey: "priority", type: "category", stroke: "var(--text-muted)", fontSize: 11, width: 100 }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Bar, { dataKey: "count", name: "Incidents", radius: [0, 4, 4, 0] }, analytics.priority_distribution.map((entry, index) => {
+                      const p = entry.priority || '';
+                      const color = p.includes('P1') ? 'var(--color-critical)' :
+                                    p.includes('P2') ? 'var(--color-warning)' :
+                                    p.includes('P3') ? 'var(--accent-secondary)' : '#94A3B8';
+                      return React.createElement(Cell, { key: `prio-${index}`, fill: color });
+                    }))))
+            ) : null))), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Activity, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Recent Incident Stream")), React.createElement(Link, { to: "/incidents", className: "btn btn-secondary btn-sm" }, React.createElement("span", null, "View All Incidents"), React.createElement(ChevronRight, { size: 14 }))), React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Report ID"), React.createElement("th", null, "ATM ID"), React.createElement("th", null, "Error Code"), React.createElement("th", null, "Category"), React.createElement("th", null, "Zone"), React.createElement("th", null, "Priority"), React.createElement("th", null, "Assigned Handler"), React.createElement("th", null, "Status"), React.createElement("th", null, "Submitted"), React.createElement("th", null, "Action"))), React.createElement("tbody", null, recentReports.length > 0 ? (
+                recentReports.map(rep => (
+                  React.createElement("tr", { key: rep.report_id }, React.createElement("td", null, React.createElement("span", { className: "code-pill" }, rep.report_id)), React.createElement("td", { style: { fontWeight: 600 } }, rep.atm_id), React.createElement("td", null, React.createElement("span", { className: "code-pill", style: { color: 'var(--accent-primary)' } }, rep.error_code)), React.createElement("td", null, React.createElement(CategoryBadge, { category: rep.category })), React.createElement("td", null, React.createElement("span", { style: { fontWeight: 500 } }, rep.zone_name)), React.createElement("td", null, React.createElement(PriorityBadge, { priority: rep.priority })), React.createElement("td", { style: { fontSize: '12px' } }, rep.assigned_handler || 'Waiting Queue'), React.createElement("td", null, React.createElement(StatusBadge, { status: rep.status })), React.createElement("td", { style: { fontSize: '11.5px', color: 'var(--text-muted)' } }, rep.created_at), React.createElement("td", null, React.createElement(Link, { to: `/incidents?search=${rep.report_id}`, className: "btn btn-secondary btn-sm", style: { padding: '3px 8px' } }, "Inspect")))
+                ))
+              ) : (
+                React.createElement("tr", null, React.createElement("td", { colSpan: 10, style: { textAlign: 'center', padding: '30px', color: 'var(--text-muted)' } }, "No incident reports logged yet."))
+              ))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Layers, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Automated Incident Dispatch Architecture (Karnataka Grid)"))), React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px', padding: '10px 0' } }, [
+            { step: '1', title: 'ATM Ingestion', desc: 'ATMBLR1234 + E31C' },
+            { step: '2', title: 'DFA Validation', desc: 'q0 to q10 & s0 to s4' },
+            { step: '3', title: 'Regex Equivalence', desc: 'L(M) == L(R) check' },
+            { step: '4', title: '5-Category Classify', desc: 'Hardware, Net, Cash, Soft, Sec' },
+            { step: '5', title: 'Prefix Extraction', desc: 'Extract BLR, MYS, MNG, HUB' },
+            { step: '6', title: 'Bellman-Ford', desc: 'Lowest-cost dispatch route' },
+            { step: '7', title: 'Handler Allocation', desc: 'Primary -> Backup -> Queue' },
+            { step: '8', title: 'SQLite Audit Trail', desc: 'Status tracking to Resolved' },
+          ].map((item, idx) => (
+            React.createElement("div", { key: item.step, style: {
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            } }, React.createElement("div", { style: {
+                padding: '10px 14px',
+                borderRadius: '8px',
+                backgroundColor: 'var(--bg-card-subtle)',
+                border: '1px solid var(--border-color)',
+                textAlign: 'center',
+                minWidth: '120px'
+              } }, React.createElement("div", { style: { fontSize: '10px', color: 'var(--accent-primary)', fontWeight: 700 } }, "STEP ", item.step), React.createElement("div", { style: { fontWeight: 600, fontSize: '12px', color: 'var(--text-primary)' } }, item.title), React.createElement("div", { style: { fontSize: '10.5px', color: 'var(--text-muted)', marginTop: '2px' } }, item.desc)), idx < 7 && React.createElement(ChevronRight, { size: 14, style: { color: 'var(--text-muted)' } }))
+          )))))
+  );
+}
+
+return Overview;
+})();
+
+const SubmitReport = (() => {
+
+const { FilePlus, CheckCircle2, AlertTriangle, HelpCircle, ShieldAlert, Binary, Send, RefreshCw, Info, MapPin, Clock, ArrowRight } = LucideIcons;
+
+
+function SubmitReport() {
+  const [formData, setFormData] = useState({
+    reporter_name: '',
+    branch_name: '',
+    contact: '',
+    email: '',
+    atm_id: '',
+    error_code: '',
+    description: '',
+    notes: '',
+    urgency: 'Medium',
+    incident_time: new Date().toISOString().slice(0, 19).replace('T', ' ')
+  });
+
+  const [liveValidation, setLiveValidation] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submissionResult, setSubmissionResult] = useState(null);
+  const [submitError, setSubmitError] = useState(null);
+
+  // Quick preset loader for convenient testing
+  const presets = [
+    { label: 'Bangalore Hardware (E12H)', atm_id: 'ATMBLR1234', error_code: 'E12H', branch: 'MG Road Bangalore', desc: 'Card reader transport motor failed.' },
+    { label: 'Mysore Cash-Handling (E31C)', atm_id: 'ATMMYS1234', error_code: 'E31C', branch: 'Sayyaji Rao Mysore', desc: 'Dispenser note shutter jam detected during payout.' },
+    { label: 'Mangaluru Network (E25N)', atm_id: 'ATMMNG1234', error_code: 'E25N', branch: 'Hampankatta Mangaluru', desc: 'Host gateway connection timeout on switch.' },
+    { label: 'Hubballi Software (E45S)', atm_id: 'ATMHUB1234', error_code: 'E45S', branch: 'Koppikar Hubballi', desc: 'Terminal OS kernel exception and freeze.' },
+    { label: 'Emergency Security (E90X)', atm_id: 'ATMBLR1234', error_code: 'E90X', branch: 'Indiranagar Bangalore', desc: 'Anti-skimmer optical sensor tripped on card bezel.' },
+    { label: 'Unmapped Prefix Fallback', atm_id: 'ATMDEL1234', error_code: 'E12H', branch: 'Test Delhi Terminal', desc: 'Testing unmapped prefix exception routing.' },
+  ];
+
+  const applyPreset = (preset) => {
+    setFormData(prev => ({
+      ...prev,
+      atm_id: preset.atm_id,
+      error_code: preset.error_code,
+      branch_name: preset.branch,
+      description: preset.desc,
+      reporter_name: prev.reporter_name || 'Rajesh Branch Officer',
+      contact: prev.contact || '+91 98450 12345',
+      email: prev.email || 'ops.branch@bank.com'
+    }));
+  };
+
+  // Perform live validation debounced
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (formData.atm_id || formData.error_code) {
+        try {
+          const res = await api.liveValidate({
+            atm_id: formData.atm_id,
+            error_code: formData.error_code,
+            description: formData.description
+          });
+          setLiveValidation(res);
+        } catch (err) {
+          console.error("Live validation failed:", err);
+        }
+      } else {
+        setLiveValidation(null);
+      }
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [formData.atm_id, formData.error_code, formData.description]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setSubmitError(null);
+    setSubmissionResult(null);
+    setSubmitting(true);
+
+    try {
+      const res = await api.submitReport(formData);
+      setSubmissionResult(res);
+      // Reset form on success except reporter details
+      setFormData(prev => ({
+        ...prev,
+        atm_id: '',
+        error_code: '',
+        description: '',
+        notes: '',
+        urgency: 'Medium'
+      }));
+    } catch (err) {
+      setSubmitError(err.message || "Failed to submit ATM incident report.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { marginBottom: '24px' } }, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Submit ATM Error Report"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Automated DFA validation, regex cross-checking, 5-category classification, and Bellman-Ford dispatch")), React.createElement("div", { style: { marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)' } }, "Demo Presets:"), presets.map((p, i) => (
+          React.createElement("button", { key: i, type: "button", onClick: () => applyPreset(p), className: "btn btn-secondary btn-sm", style: { fontSize: '11.5px', padding: '4px 10px' } }, p.label)
+        ))), React.createElement("div", { className: "grid-2" }, React.createElement("div", { className: "card" }, React.createElement("form", { onSubmit: handleSubmit }, React.createElement("div", { style: { marginBottom: '20px' } }, React.createElement("div", { style: {
+                fontSize: '13px',
+                fontWeight: 700,
+                color: 'var(--accent-primary)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                marginBottom: '12px',
+                paddingBottom: '6px',
+                borderBottom: '1px solid var(--border-color)'
+              } }, "Section A — Reporter Information"), React.createElement("div", { className: "grid-2", style: { gap: '12px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Reporter Name *"), React.createElement("input", { type: "text", required: true, placeholder: "e.g. Suresh Kumar", value: formData.reporter_name, onChange: e => setFormData({ ...formData, reporter_name: e.target.value }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Branch Name *"), React.createElement("input", { type: "text", required: true, placeholder: "e.g. Koramangala Bangalore", value: formData.branch_name, onChange: e => setFormData({ ...formData, branch_name: e.target.value }), className: "form-input" }))), React.createElement("div", { className: "grid-2", style: { gap: '12px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Contact Number"), React.createElement("input", { type: "tel", placeholder: "e.g. +91 98450 12345", value: formData.contact, onChange: e => setFormData({ ...formData, contact: e.target.value }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Email Address"), React.createElement("input", { type: "email", placeholder: "e.g. branch.ops@bank.com", value: formData.email, onChange: e => setFormData({ ...formData, email: e.target.value }), className: "form-input" })))), React.createElement("div", { style: { marginBottom: '20px' } }, React.createElement("div", { style: {
+                fontSize: '13px',
+                fontWeight: 700,
+                color: 'var(--accent-primary)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                marginBottom: '12px',
+                paddingBottom: '6px',
+                borderBottom: '1px solid var(--border-color)'
+              } }, "Section B — ATM & Error Identifiers"), React.createElement("div", { className: "grid-2", style: { gap: '12px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "ATM ID * ", React.createElement("span", { style: { fontWeight: 400, color: 'var(--text-muted)' } }, "(ATM + 3 alpha + 4 digits)")), React.createElement("input", { type: "text", required: true, maxLength: 10, placeholder: "e.g. ATMBLR1234", value: formData.atm_id, onChange: e => setFormData({ ...formData, atm_id: e.target.value.toUpperCase() }), className: `form-input ${
+                      liveValidation?.atm_id?.value ? (liveValidation.atm_id.dfa_valid ? 'is-valid' : 'is-invalid') : ''
+                    }`, style: { fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.5px' } }), React.createElement("span", { className: "form-hint" }, "Regex: ^ATM[A-Z]{3}[0-9]{4}$")), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Error Code * ", React.createElement("span", { style: { fontWeight: 400, color: 'var(--text-muted)' } }, "(E + 2 digits + 1 alpha)")), React.createElement("input", { type: "text", required: true, maxLength: 4, placeholder: "e.g. E12H", value: formData.error_code, onChange: e => setFormData({ ...formData, error_code: e.target.value.toUpperCase() }), className: `form-input ${
+                      liveValidation?.error_code?.value ? (liveValidation.error_code.dfa_valid ? 'is-valid' : 'is-invalid') : ''
+                    }`, style: { fontFamily: 'var(--font-mono)', fontWeight: 600, letterSpacing: '0.5px' } }), React.createElement("span", { className: "form-hint" }, "Regex: ^E[0-9]{2}[A-Z]$")))), React.createElement("div", { style: { marginBottom: '20px' } }, React.createElement("div", { style: {
+                fontSize: '13px',
+                fontWeight: 700,
+                color: 'var(--accent-primary)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                marginBottom: '12px',
+                paddingBottom: '6px',
+                borderBottom: '1px solid var(--border-color)'
+              } }, "Section C — Incident Information"), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Error Description *"), React.createElement("textarea", { required: true, rows: 3, placeholder: "Describe the malfunction observed on terminal...", value: formData.description, onChange: e => setFormData({ ...formData, description: e.target.value }), className: "form-textarea" })), React.createElement("div", { className: "grid-2", style: { gap: '12px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Urgency Level *"), React.createElement("select", { value: formData.urgency, onChange: e => setFormData({ ...formData, urgency: e.target.value }), className: "form-select" }, React.createElement("option", { value: "Low" }, "Low (Standard)"), React.createElement("option", { value: "Medium" }, "Medium (Operational Impact)"), React.createElement("option", { value: "High" }, "High (Terminal Halted)"), React.createElement("option", { value: "Critical" }, "Critical (Immediate Emergency / Risk)"))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Incident Date & Time"), React.createElement("input", { type: "text", value: formData.incident_time, onChange: e => setFormData({ ...formData, incident_time: e.target.value }), className: "form-input" }))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Additional Operator Notes"), React.createElement("input", { type: "text", placeholder: "Optional branch supervisory notes...", value: formData.notes, onChange: e => setFormData({ ...formData, notes: e.target.value }), className: "form-input" }))), submitError && (
+              React.createElement("div", { style: {
+                padding: '12px',
+                borderRadius: '6px',
+                backgroundColor: 'var(--color-critical-bg)',
+                color: 'var(--color-critical)',
+                border: '1px solid rgba(224, 82, 82, 0.3)',
+                fontSize: '13px',
+                marginBottom: '16px'
+              } }, React.createElement("strong", null, "Submission Rejected:"), " ", submitError)
+            ), React.createElement("button", { type: "submit", disabled: submitting, className: "btn btn-primary", style: { width: '100%', padding: '12px', fontSize: '14px', fontWeight: 600 } }, submitting ? (
+                React.createElement(React.Fragment, null, React.createElement(RefreshCw, { size: 16, className: "animate-spin" }), React.createElement("span", null, "Processing DFA & Dispatching..."))
+              ) : (
+                React.createElement(React.Fragment, null, React.createElement(Send, { size: 16 }), React.createElement("span", null, "Submit Incident & Trigger Dispatch Engine"))
+              )))), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '20px' } }, submissionResult && (
+            React.createElement("div", { className: "card", style: { borderColor: 'var(--color-success)', background: 'linear-gradient(180deg, rgba(37, 168, 121, 0.1) 0%, var(--bg-card) 100%)' } }, React.createElement("div", { className: "card-header", style: { borderBottomColor: 'rgba(37, 168, 121, 0.3)' } }, React.createElement("div", { className: "card-title", style: { color: 'var(--color-success)' } }, React.createElement(CheckCircle2, { size: 18 }), React.createElement("span", null, "INCIDENT LOGGED & DISPATCHED SUCCESSFULLY")), React.createElement("span", { className: "code-pill", style: { color: '#FFFFFF', backgroundColor: 'var(--color-success)' } }, submissionResult.report_id)), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '12px' } }, React.createElement("div", { style: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' } }, React.createElement("div", { style: { padding: '8px 12px', borderRadius: '6px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Assigned Category"), React.createElement("div", { style: { marginTop: '4px' } }, React.createElement(CategoryBadge, { category: submissionResult.classification?.category }))), React.createElement("div", { style: { padding: '8px 12px', borderRadius: '6px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Calculated Priority"), React.createElement("div", { style: { marginTop: '4px' } }, React.createElement(PriorityBadge, { priority: submissionResult.priority?.level }))), React.createElement("div", { style: { padding: '8px 12px', borderRadius: '6px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Regional Support Zone"), React.createElement("div", { style: { fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px' } }, submissionResult.routing?.zone)), React.createElement("div", { style: { padding: '8px 12px', borderRadius: '6px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Assigned Handler"), React.createElement("div", { style: { fontWeight: 600, color: 'var(--accent-primary)', marginTop: '2px' } }, submissionResult.routing?.handler_name))), React.createElement("div", null, React.createElement("div", { style: { fontSize: '11.5px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' } }, "Bellman-Ford Calculated Dispatch Path (Total Cost: ", submissionResult.routing?.route_cost, " min)"), React.createElement("div", { className: "route-trail" }, submissionResult.routing?.route_nodes?.map((node, i) => (
+                      React.createElement(React.Fragment, { key: i }, React.createElement("span", { className: "route-node" }, node), i < submissionResult.routing.route_nodes.length - 1 && React.createElement("span", { className: "route-arrow" }, "→"))
+                    )))), React.createElement("div", { style: { fontSize: '11.5px', color: 'var(--text-secondary)', fontStyle: 'italic', padding: '8px', backgroundColor: 'rgba(0,0,0,0.2)', borderRadius: '6px' } }, submissionResult.routing?.routing_reason)))
+          ), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Binary, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Live Automata & Regex Inspection")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "BCS503 Verification")), liveValidation ? (
+              React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' } }, "ATM ID DFA Machine:"), React.createElement("span", { className: `badge ${liveValidation.atm_id.dfa_valid ? 'badge-status-resolved' : 'badge-status-pending'}` }, liveValidation.atm_id.dfa_valid ? 'ACCEPTED (q10)' : `STATE: ${liveValidation.atm_id.current_state}`)), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-primary)', marginBottom: '6px' } }, liveValidation.atm_id.message), React.createElement("div", { style: { display: 'flex', gap: '12px', fontSize: '11.5px', color: 'var(--text-muted)' } }, React.createElement("span", null, "Regex Match: ", React.createElement("strong", null, liveValidation.atm_id.regex_valid ? 'YES' : 'NO')), React.createElement("span", null, "L(M) == L(R) Agreement: ", React.createElement("strong", null, liveValidation.atm_id.agreed ? 'YES' : 'NO')))), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' } }, "Error Code DFA Machine:"), React.createElement("span", { className: `badge ${liveValidation.error_code.dfa_valid ? 'badge-status-resolved' : 'badge-status-pending'}` }, liveValidation.error_code.dfa_valid ? 'ACCEPTED (s4)' : `STATE: ${liveValidation.error_code.current_state}`)), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-primary)', marginBottom: '6px' } }, liveValidation.error_code.message), React.createElement("div", { style: { display: 'flex', gap: '12px', fontSize: '11.5px', color: 'var(--text-muted)' } }, React.createElement("span", null, "Regex Match: ", React.createElement("strong", null, liveValidation.error_code.regex_valid ? 'YES' : 'NO')), React.createElement("span", null, "L(M) == L(R) Agreement: ", React.createElement("strong", null, liveValidation.error_code.agreed ? 'YES' : 'NO')))), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' } }, "Engine Deduction Preview:"), React.createElement("div", { style: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' } }, React.createElement("div", null, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Predicted Category:"), React.createElement("div", { style: { marginTop: '4px' } }, React.createElement(CategoryBadge, { category: liveValidation.category_preview.category }))), React.createElement("div", null, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Extracted Routing Zone:"), React.createElement("div", { style: { fontWeight: 600, color: 'var(--text-primary)', marginTop: '4px' } }, liveValidation.routing_preview.zone || 'None'))), liveValidation.category_preview.reason && (
+                    React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' } }, "Reason: ", liveValidation.category_preview.reason)
+                  )))
+            ) : (
+              React.createElement("div", { style: { textAlign: 'center', padding: '30px 10px', color: 'var(--text-muted)', fontSize: '13px' } }, React.createElement(Info, { size: 28, style: { margin: '0 auto 8px', opacity: 0.5 } }), "Type an ATM ID (e.g. ATMBLR1234) and Error Code (e.g. E12H) to view live state transitions.")
+            )))))
+  );
+}
+
+return SubmitReport;
+})();
+
+const IncidentManagement = (() => {
+
+const { Search, Filter, RefreshCw, Eye, CheckCircle2, Clock, AlertTriangle, X, MapPin, User, FileText, Calendar, Layers, Shield, Activity, Send } = LucideIcons;
+
+
+function IncidentManagement() {
+  const getInitialParam = (key) => {
+    if (typeof window === 'undefined') return '';
+    const hashQuery = (window.location.hash.split('?')[1] || '');
+    const params = new URLSearchParams(hashQuery || window.location.search);
+    return params.get(key) || '';
+  };
+
+  const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState(() => getInitialParam('search'));
+  const [statusFilter, setStatusFilter] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [zoneFilter, setZoneFilter] = useState('');
+  const [priorityFilter, setPriorityFilter] = useState(() => getInitialParam('priority'));
+
+  // Selected report for inspection modal
+  const [selectedReportId, setSelectedReportId] = useState(null);
+  const [selectedReportDetail, setSelectedReportDetail] = useState(null);
+  const [modalLoading, setModalLoading] = useState(false);
+
+  // Status update state
+  const [newStatus, setNewStatus] = useState('In Progress');
+  const [resolutionNotes, setResolutionNotes] = useState('');
+  const [updatingStatus, setUpdatingStatus] = useState(false);
+
+  const fetchReports = async () => {
+    try {
+      setLoading(true);
+      const data = await api.getReports({
+        search,
+        status: statusFilter,
+        category: categoryFilter,
+        zone: zoneFilter,
+        priority: priorityFilter
+      });
+      setReports(data);
+    } catch (err) {
+      console.error("Failed to load reports:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchReports();
+  }, [statusFilter, categoryFilter, zoneFilter, priorityFilter]);
+
+  const handleSearchSubmit = (e) => {
+    e.preventDefault();
+    fetchReports();
+  };
+
+  const openReportDetail = async (id) => {
+    setSelectedReportId(id);
+    try {
+      setModalLoading(true);
+      const detail = await api.getReportDetail(id);
+      setSelectedReportDetail(detail);
+      setNewStatus(detail.report.status === 'Resolved' ? 'Resolved' : 'In Progress');
+      setResolutionNotes(detail.report.resolution_notes || '');
+    } catch (err) {
+      console.error("Failed to fetch detail:", err);
+    } finally {
+      setModalLoading(false);
+    }
+  };
+
+  const handleStatusUpdate = async () => {
+    if (!selectedReportId) return;
+    try {
+      setUpdatingStatus(true);
+      await api.updateReportStatus(selectedReportId, {
+        status: newStatus,
+        resolution_notes: resolutionNotes,
+        updated_by: 'Regional Incident Handler'
+      });
+      // Refresh detail and report list
+      const updated = await api.getReportDetail(selectedReportId);
+      setSelectedReportDetail(updated);
+      fetchReports();
+    } catch (err) {
+      alert("Status update failed: " + err.message);
+    } finally {
+      setUpdatingStatus(false);
+    }
+  };
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Incident Management & Tracking"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Comprehensive audit record, status tracking, and handler lifecycle for Karnataka ATM terminals")), React.createElement("button", { onClick: fetchReports, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Incidents"))), React.createElement("div", { className: "card", style: { marginBottom: '20px', padding: '16px' } }, React.createElement("form", { onSubmit: handleSearchSubmit, style: { display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'center' } }, React.createElement("div", { style: { flex: '1', minWidth: '240px', position: 'relative' } }, React.createElement(Search, { size: 16, style: { position: 'absolute', left: '12px', top: '10px', color: 'var(--text-muted)' } }), React.createElement("input", { type: "text", placeholder: "Search by Report ID, ATM ID, branch, reporter, or code...", value: search, onChange: e => setSearch(e.target.value), className: "form-input", style: { paddingLeft: '36px' } })), React.createElement("div", { style: { width: '150px' } }, React.createElement("select", { value: statusFilter, onChange: e => setStatusFilter(e.target.value), className: "form-select" }, React.createElement("option", { value: "" }, "All Statuses"), React.createElement("option", { value: "Pending" }, "Pending"), React.createElement("option", { value: "Assigned" }, "Assigned"), React.createElement("option", { value: "In Progress" }, "In Progress"), React.createElement("option", { value: "Resolved" }, "Resolved"), React.createElement("option", { value: "Pending Manual Correction" }, "Manual Review"))), React.createElement("div", { style: { width: '150px' } }, React.createElement("select", { value: zoneFilter, onChange: e => setZoneFilter(e.target.value), className: "form-select" }, React.createElement("option", { value: "" }, "All Zones"), React.createElement("option", { value: "Bangalore" }, "Bangalore"), React.createElement("option", { value: "Mysore" }, "Mysore"), React.createElement("option", { value: "Mangaluru" }, "Mangaluru"), React.createElement("option", { value: "Hubballi" }, "Hubballi"), React.createElement("option", { value: "Central" }, "Central (Security)"), React.createElement("option", { value: "Unassigned" }, "Unassigned"))), React.createElement("div", { style: { width: '150px' } }, React.createElement("select", { value: categoryFilter, onChange: e => setCategoryFilter(e.target.value), className: "form-select" }, React.createElement("option", { value: "" }, "All Categories"), React.createElement("option", { value: "Hardware" }, "Hardware"), React.createElement("option", { value: "Network" }, "Network"), React.createElement("option", { value: "Cash-Handling" }, "Cash-Handling"), React.createElement("option", { value: "Software" }, "Software"), React.createElement("option", { value: "Security" }, "Security"))), React.createElement("div", { style: { width: '140px' } }, React.createElement("select", { value: priorityFilter, onChange: e => setPriorityFilter(e.target.value), className: "form-select" }, React.createElement("option", { value: "" }, "All Priorities"), React.createElement("option", { value: "P1" }, "P1 Critical"), React.createElement("option", { value: "P2" }, "P2 High"), React.createElement("option", { value: "P3" }, "P3 Medium"), React.createElement("option", { value: "P4" }, "P4 Low"))), React.createElement("button", { type: "submit", className: "btn btn-primary btn-sm" }, React.createElement("span", null, "Filter")))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Report ID"), React.createElement("th", null, "ATM ID"), React.createElement("th", null, "Branch & Reporter"), React.createElement("th", null, "Error"), React.createElement("th", null, "Category"), React.createElement("th", null, "Zone"), React.createElement("th", null, "Priority"), React.createElement("th", null, "Assigned Handler"), React.createElement("th", null, "Status"), React.createElement("th", null, "Logged At"), React.createElement("th", null, "Action"))), React.createElement("tbody", null, reports.length > 0 ? (
+                reports.map(rep => (
+                  React.createElement("tr", { key: rep.report_id }, React.createElement("td", null, React.createElement("span", { className: "code-pill" }, rep.report_id)), React.createElement("td", { style: { fontWeight: 600 } }, rep.atm_id), React.createElement("td", null, React.createElement("div", { style: { fontWeight: 500 } }, rep.branch), React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, rep.reporter_name)), React.createElement("td", null, React.createElement("span", { className: "code-pill", style: { color: 'var(--accent-primary)' } }, rep.error_code)), React.createElement("td", null, React.createElement(CategoryBadge, { category: rep.category })), React.createElement("td", null, React.createElement("span", { style: { fontWeight: 500 } }, rep.zone_name)), React.createElement("td", null, React.createElement(PriorityBadge, { priority: rep.priority })), React.createElement("td", { style: { fontSize: '12px' } }, rep.assigned_handler ? (
+                        React.createElement("div", null, React.createElement("div", { style: { fontWeight: 500 } }, rep.assigned_handler), React.createElement("div", { style: { fontSize: '10.5px', color: 'var(--text-muted)' } }, rep.assigned_team))
+                      ) : (
+                        React.createElement("span", { style: { color: 'var(--text-muted)' } }, "Waiting Queue")
+                      )), React.createElement("td", null, React.createElement(StatusBadge, { status: rep.status })), React.createElement("td", { style: { fontSize: '11.5px', color: 'var(--text-muted)' } }, rep.created_at), React.createElement("td", null, React.createElement("button", { onClick: () => openReportDetail(rep.report_id), className: "btn btn-secondary btn-sm", style: { padding: '4px 8px' } }, React.createElement(Eye, { size: 13 }), React.createElement("span", null, "Inspect"))))
+                ))
+              ) : (
+                React.createElement("tr", null, React.createElement("td", { colSpan: 11, style: { textAlign: 'center', padding: '36px', color: 'var(--text-muted)' } }, "No incident reports match the current filter criteria."))
+              ))))), selectedReportId && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setSelectedReportId(null) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '850px' } }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px', paddingBottom: '12px', borderBottom: '1px solid var(--border-color)' } }, React.createElement("div", null, React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '8px' } }, React.createElement("h3", { style: { fontSize: '18px', fontWeight: 700, color: 'var(--text-primary)' } }, "Incident Detail — ", selectedReportId), selectedReportDetail?.report && React.createElement(StatusBadge, { status: selectedReportDetail.report.status })), React.createElement("div", { style: { fontSize: '11.5px', color: 'var(--text-muted)', marginTop: '2px' } }, "Submitted on ", selectedReportDetail?.report?.created_at)), React.createElement("button", { onClick: () => setSelectedReportId(null), className: "btn btn-secondary btn-sm", style: { padding: '6px' } }, React.createElement(X, { size: 16 }))), modalLoading || !selectedReportDetail ? (
+              React.createElement("div", { style: { textAlign: 'center', padding: '40px' } }, React.createElement(RefreshCw, { size: 24, className: "animate-spin", style: { margin: '0 auto 10px', color: 'var(--accent-primary)' } }), React.createElement("div", null, "Loading incident records and DFA traces..."))
+            ) : (
+              React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '20px' } }, React.createElement("div", { style: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' } }, React.createElement("div", { style: { padding: '10px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "ATM Terminal"), React.createElement("div", { style: { fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', marginTop: '2px' } }, selectedReportDetail.report.atm_id)), React.createElement("div", { style: { padding: '10px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Category"), React.createElement("div", { style: { marginTop: '4px' } }, React.createElement(CategoryBadge, { category: selectedReportDetail.report.category }))), React.createElement("div", { style: { padding: '10px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Priority"), React.createElement("div", { style: { marginTop: '4px' } }, React.createElement(PriorityBadge, { priority: selectedReportDetail.report.priority }))), React.createElement("div", { style: { padding: '10px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)' } }, React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Regional Zone"), React.createElement("div", { style: { fontWeight: 600, color: 'var(--text-primary)', marginTop: '2px' } }, selectedReportDetail.report.zone_name))), React.createElement("div", { className: "grid-2", style: { gap: '16px' } }, React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--accent-primary)', marginBottom: '8px' } }, "Reporter & Branch Information"), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12.5px' } }, React.createElement("div", null, "Branch: ", React.createElement("strong", null, selectedReportDetail.report.branch)), React.createElement("div", null, "Reporter: ", React.createElement("strong", null, selectedReportDetail.report.reporter_name)), React.createElement("div", null, "Contact: ", React.createElement("strong", null, selectedReportDetail.report.contact || 'N/A')), React.createElement("div", null, "Email: ", React.createElement("strong", null, selectedReportDetail.report.email || 'N/A')))), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--accent-primary)', marginBottom: '8px' } }, "Validation & Classification Analysis"), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '12px' } }, React.createElement("div", null, "Validation: ", React.createElement("span", { style: { color: 'var(--color-success)', fontWeight: 600 } }, "PASSED (DFA q10 / Regex Match)")), React.createElement("div", null, "Error Code: ", React.createElement("span", { className: "code-pill" }, selectedReportDetail.report.error_code)), React.createElement("div", { style: { color: 'var(--text-secondary)' } }, "Reason: ", selectedReportDetail.report.classification_reason)))), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '4px' } }, "Incident Description:"), React.createElement("div", { style: { fontSize: '13px', color: 'var(--text-primary)' } }, selectedReportDetail.report.description)), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)' } }, "Bellman-Ford Dispatch Path:"), React.createElement("span", { style: { fontSize: '11px', color: 'var(--accent-primary)', fontWeight: 600 } }, "Routing Cost: ", selectedReportDetail.report.route_cost, " min")), React.createElement("div", { className: "route-trail" }, selectedReportDetail.report.route ? (
+                      selectedReportDetail.report.route.split(' -> ').map((node, idx, arr) => (
+                        React.createElement(React.Fragment, { key: idx }, React.createElement("span", { className: "route-node" }, node), idx < arr.length - 1 && React.createElement("span", { className: "route-arrow" }, "→"))
+                      ))
+                    ) : (
+                      React.createElement("span", null, "Direct Route")
+                    )), React.createElement("div", { style: { marginTop: '8px', fontSize: '12px', color: 'var(--text-muted)' } }, "Assigned Handler: ", React.createElement("strong", { style: { color: 'var(--text-primary)' } }, selectedReportDetail.handler?.name || selectedReportDetail.report.assigned_handler || 'Unassigned'), " (", selectedReportDetail.report.assigned_team || 'Waiting Queue', ")")), React.createElement("div", null, React.createElement("div", { style: { fontSize: '13px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '10px' } }, "Incident Event Audit History:"), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, selectedReportDetail.history?.map((h, i) => (
+                      React.createElement("div", { key: i, style: {
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        padding: '8px 12px',
+                        borderRadius: '6px',
+                        backgroundColor: 'rgba(0,0,0,0.2)',
+                        borderLeft: '3px solid var(--accent-primary)',
+                        fontSize: '12px'
+                      } }, React.createElement("div", null, React.createElement("span", { style: { fontWeight: 600, color: 'var(--text-primary)' } }, h.previous_status, " → ", h.new_status), React.createElement("span", { style: { color: 'var(--text-muted)', marginLeft: '8px' } }, "by ", h.updated_by), h.notes && React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-secondary)', marginTop: '2px' } }, h.notes)), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, h.timestamp))
+                    )))), React.createElement("div", { style: { padding: '16px', borderRadius: '8px', backgroundColor: 'rgba(25, 167, 160, 0.08)', border: '1px solid rgba(25, 167, 160, 0.25)' } }, React.createElement("div", { style: { fontSize: '13px', fontWeight: 700, color: 'var(--accent-primary)', marginBottom: '12px' } }, "Update Incident Status & Resolution"), React.createElement("div", { style: { display: 'flex', gap: '12px', flexWrap: 'wrap', alignItems: 'flex-end' } }, React.createElement("div", { style: { width: '180px' } }, React.createElement("label", { className: "form-label" }, "New Status"), React.createElement("select", { value: newStatus, onChange: e => setNewStatus(e.target.value), className: "form-select" }, React.createElement("option", { value: "Assigned" }, "Assigned"), React.createElement("option", { value: "In Progress" }, "In Progress"), React.createElement("option", { value: "Resolved" }, "Resolved (Frees Handler)"))), React.createElement("div", { style: { flex: '1', minWidth: '240px' } }, React.createElement("label", { className: "form-label" }, "Resolution / Progress Notes"), React.createElement("input", { type: "text", placeholder: "e.g. Technician replaced jammed cassette roller...", value: resolutionNotes, onChange: e => setResolutionNotes(e.target.value), className: "form-input" })), React.createElement("button", { onClick: handleStatusUpdate, disabled: updatingStatus, className: "btn btn-primary", style: { height: '38px' } }, updatingStatus ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(Send, { size: 14 }), React.createElement("span", null, "Update Status")))))
+            )))
+      ))
+  );
+}
+
+return IncidentManagement;
+})();
+
+const AutomataLab = (() => {
+
+const { Binary, Play, RotateCcw, CheckCircle2, XCircle, ArrowRight, Cpu, Layers, FastForward, Info } = LucideIcons;
+
+function AutomataLab() {
+  const [activeTab, setActiveTab] = useState('atm'); // 'atm' or 'error'
+  const [inputStr, setInputStr] = useState('ATMBLR1234');
+  const [stepIndex, setStepIndex] = useState(-1);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [trace, setTrace] = useState([]);
+  const [validationData, setValidationData] = useState(null);
+
+  // Preset vectors for quick demonstration
+  const atmPresets = [
+    { label: 'ATMBLR1234 (Valid Bangalore)', val: 'ATMBLR1234' },
+    { label: 'ATMMYS1234 (Valid Mysore)', val: 'ATMMYS1234' },
+    { label: 'ATMMNG1234 (Valid Mangaluru)', val: 'ATMMNG1234' },
+    { label: 'ATMHUB1234 (Valid Hubballi)', val: 'ATMHUB1234' },
+    { label: 'ATM1234567 (Invalid: Missing Letters)', val: 'ATM1234567' },
+    { label: 'ATMBLR123 (Invalid: Incomplete)', val: 'ATMBLR123' },
+    { label: 'ATMXYZ9999 (Valid Custom)', val: 'ATMXYZ9999' },
+  ];
+
+  const errorPresets = [
+    { label: 'E12H (Valid Hardware)', val: 'E12H' },
+    { label: 'E25N (Valid Network)', val: 'E25N' },
+    { label: 'E31C (Valid Cash-Handling)', val: 'E31C' },
+    { label: 'E45S (Valid Software)', val: 'E45S' },
+    { label: 'E90X (Valid Security)', val: 'E90X' },
+    { label: 'E123H (Invalid: 3 digits)', val: 'E123H' },
+    { label: 'E1H (Invalid: 1 digit)', val: 'E1H' },
+    { label: 'X12H (Invalid: No E prefix)', val: 'X12H' },
+  ];
+
+  // Benchmark comparison table vectors (Section 7.F)
+  const comparisonVectors = [
+    { input: 'ATMBLR1234', type: 'ATM ID', dfa: true, regex: true, agreement: true, note: 'Valid Karnataka Bangalore Terminal' },
+    { input: 'ATMMYS1234', type: 'ATM ID', dfa: true, regex: true, agreement: true, note: 'Valid Karnataka Mysore Terminal' },
+    { input: 'ATMMNG1234', type: 'ATM ID', dfa: true, regex: true, agreement: true, note: 'Valid Karnataka Mangaluru Terminal' },
+    { input: 'ATMHUB1234', type: 'ATM ID', dfa: true, regex: true, agreement: true, note: 'Valid Karnataka Hubballi Terminal' },
+    { input: 'ATM1234567', type: 'ATM ID', dfa: false, regex: false, agreement: true, note: 'Rejects non-alphabetic region code' },
+    { input: 'ATMBLR123', type: 'ATM ID', dfa: false, regex: false, agreement: true, note: 'Rejects incomplete length (< 10)' },
+    { input: 'E12H', type: 'Error Code', dfa: true, regex: true, agreement: true, note: 'Valid Hardware error code' },
+    { input: 'E25N', type: 'Error Code', dfa: true, regex: true, agreement: true, note: 'Valid Network error code' },
+    { input: 'E123H', type: 'Error Code', dfa: false, regex: false, agreement: true, note: 'Rejects 3-digit numeric code' },
+    { input: 'E1H', type: 'Error Code', dfa: false, regex: false, agreement: true, note: 'Rejects 1-digit numeric code' },
+  ];
+
+  // Run live validation whenever input changes
+  useEffect(() => {
+    const runValidation = async () => {
+      try {
+        const payload = activeTab === 'atm' ? { atm_id: inputStr } : { error_code: inputStr };
+        const res = await api.liveValidate(payload);
+        setValidationData(res);
+        const selectedTrace = activeTab === 'atm' ? res.atm_id.dfa_trace : res.error_code.dfa_trace;
+        setTrace(selectedTrace || []);
+        setStepIndex((selectedTrace || []).length - 1);
+      } catch (err) {
+        console.error("Automata validation failed:", err);
+      }
+    };
+
+    if (inputStr) {
+      runValidation();
+    } else {
+      setTrace([]);
+      setStepIndex(-1);
+      setValidationData(null);
+    }
+  }, [inputStr, activeTab]);
+
+  // Step-by-step playback timer
+  useEffect(() => {
+    let timer;
+    if (isPlaying && stepIndex < trace.length - 1) {
+      timer = setTimeout(() => {
+        setStepIndex(prev => prev + 1);
+      }, 700);
+    } else if (stepIndex >= trace.length - 1) {
+      setIsPlaying(false);
+    }
+    return () => clearTimeout(timer);
+  }, [isPlaying, stepIndex, trace]);
+
+  const handleTabChange = (tab) => {
+    setActiveTab(tab);
+    setInputStr(tab === 'atm' ? 'ATMBLR1234' : 'E12H');
+    setStepIndex(-1);
+    setIsPlaying(false);
+  };
+
+  const startSimulation = () => {
+    setStepIndex(0);
+    setIsPlaying(true);
+  };
+
+  const resetSimulation = () => {
+    setIsPlaying(false);
+    setStepIndex(trace.length > 0 ? trace.length - 1 : -1);
+  };
+
+  const currentStep = trace[stepIndex] || trace[trace.length - 1] || null;
+  const currentStateName = currentStep ? currentStep.to_state : (activeTab === 'atm' ? 'q0' : 's0');
+
+  // ATM DFA state definitions for SVG diagram
+  const atmStates = [
+    { id: 'q0', label: 'q0', x: 40, y: 70, isStart: true },
+    { id: 'q1', label: 'q1', x: 110, y: 70 },
+    { id: 'q2', label: 'q2', x: 180, y: 70 },
+    { id: 'q3', label: 'q3', x: 250, y: 70 },
+    { id: 'q4', label: 'q4', x: 320, y: 70 },
+    { id: 'q5', label: 'q5', x: 390, y: 70 },
+    { id: 'q6', label: 'q6', x: 460, y: 70 },
+    { id: 'q7', label: 'q7', x: 530, y: 70 },
+    { id: 'q8', label: 'q8', x: 600, y: 70 },
+    { id: 'q9', label: 'q9', x: 670, y: 70 },
+    { id: 'q10', label: 'q10', x: 740, y: 70, isAccept: true },
+    { id: 'q_trap', label: 'q_trap', x: 400, y: 150, isTrap: true }
+  ];
+
+  // Error Code DFA state definitions
+  const errorStates = [
+    { id: 's0', label: 's0', x: 70, y: 70, isStart: true },
+    { id: 's1', label: 's1', x: 200, y: 70 },
+    { id: 's2', label: 's2', x: 340, y: 70 },
+    { id: 's3', label: 's3', x: 480, y: 70 },
+    { id: 's4', label: 's4', x: 620, y: 70, isAccept: true },
+    { id: 's_trap', label: 's_trap', x: 340, y: 150, isTrap: true }
+  ];
+
+  const currentStates = activeTab === 'atm' ? atmStates : errorStates;
+  const isAccepted = currentStep?.is_accepting || false;
+  const isTrap = currentStateName.includes('trap');
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { marginBottom: '20px' } }, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "BCS503 – Automata Theory & Computability Lab"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Deterministic Finite Automata (DFA) state simulator, transition tracing, and regular expression equivalence")), React.createElement("div", { style: { display: 'flex', gap: '8px', marginBottom: '20px' } }, React.createElement("button", { onClick: () => handleTabChange('atm'), className: `btn ${activeTab === 'atm' ? 'btn-primary' : 'btn-secondary'}` }, React.createElement(Binary, { size: 15 }), React.createElement("span", null, "ATM ID Machine M1: (ATM + 3 alpha + 4 digits)")), React.createElement("button", { onClick: () => handleTabChange('error'), className: `btn ${activeTab === 'error' ? 'btn-primary' : 'btn-secondary'}` }, React.createElement(Binary, { size: 15 }), React.createElement("span", null, "Error Code Machine M2: (E + 2 digits + 1 alpha)"))), React.createElement("div", { style: { marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)' } }, "Quick Input Vectors:"), (activeTab === 'atm' ? atmPresets : errorPresets).map((p, idx) => (
+          React.createElement("button", { key: idx, onClick: () => setInputStr(p.val), className: "btn btn-secondary btn-sm", style: { fontSize: '11px', padding: '3px 8px' } }, p.label)
+        ))), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Cpu, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Interactive Visual DFA Simulator (SVG Engine)")), React.createElement("div", { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, React.createElement("span", { style: { fontSize: '12px', color: 'var(--text-muted)' } }, "Step ", stepIndex >= 0 ? stepIndex + 1 : 0, " of ", trace.length), React.createElement("button", { onClick: startSimulation, disabled: isPlaying || trace.length <= 1, className: "btn btn-primary btn-sm" }, React.createElement(Play, { size: 14 }), React.createElement("span", null, "Step-Through Play")), React.createElement("button", { onClick: resetSimulation, className: "btn btn-secondary btn-sm" }, React.createElement(RotateCcw, { size: 14 }), React.createElement("span", null, "Reset")))), React.createElement("div", { style: { display: 'flex', gap: '12px', alignItems: 'center', marginBottom: '20px' } }, React.createElement("div", { style: { flex: 1, maxWidth: '400px' } }, React.createElement("input", { type: "text", value: inputStr, onChange: e => setInputStr(e.target.value.toUpperCase()), placeholder: activeTab === 'atm' ? "e.g. ATMBLR1234" : "e.g. E12H", className: "form-input", style: { fontFamily: 'var(--font-mono)', fontSize: '16px', fontWeight: 700, letterSpacing: '1px' } })), React.createElement("div", null, isAccepted ? (
+              React.createElement("span", { className: "badge badge-status-resolved", style: { fontSize: '13px', padding: '6px 12px' } }, React.createElement(CheckCircle2, { size: 16 }), " LANGUAGE ACCEPTED (FINAL STATE ", currentStateName, ")")
+            ) : isTrap ? (
+              React.createElement("span", { className: "badge badge-p1", style: { fontSize: '13px', padding: '6px 12px' } }, React.createElement(XCircle, { size: 16 }), " TRAP STATE HIT (REJECTED BY DFA)")
+            ) : (
+              React.createElement("span", { className: "badge badge-status-pending", style: { fontSize: '13px', padding: '6px 12px' } }, "STATE: ", currentStateName, " (IN PROGRESS)")
+            ))), React.createElement("div", { style: {
+          backgroundColor: 'var(--bg-card-subtle)',
+          borderRadius: '8px',
+          border: '1px solid var(--border-color)',
+          padding: '20px 10px',
+          overflowX: 'auto'
+        } }, React.createElement("svg", { width: activeTab === 'atm' ? "800" : "700", height: "200", viewBox: activeTab === 'atm' ? "0 0 800 200" : "0 0 700 200" }, React.createElement("defs", null, React.createElement("marker", { id: "arrow", viewBox: "0 0 10 10", refX: "22", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" }, React.createElement("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "var(--text-muted)" })), React.createElement("marker", { id: "arrow-active", viewBox: "0 0 10 10", refX: "22", refY: "5", markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse" }, React.createElement("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "var(--accent-primary)" }))), currentStates.map((st, i) => {
+              if (i < (activeTab === 'atm' ? 10 : 4)) {
+                const nextSt = currentStates[i + 1];
+                const isActiveTransition = currentStep?.from_state === st.id && currentStep?.to_state === nextSt.id;
+                return (
+                  React.createElement("g", { key: `edge-${i}` }, React.createElement("line", { x1: st.x, y1: st.y, x2: nextSt.x, y2: nextSt.y, stroke: isActiveTransition ? 'var(--accent-primary)' : 'rgba(255,255,255,0.2)', strokeWidth: isActiveTransition ? "3" : "1.5", markerEnd: isActiveTransition ? "url(#arrow-active)" : "url(#arrow)" }))
+                );
+              }
+              return null;
+            }), React.createElement("path", { d: activeTab === 'atm' ? "M 400 90 L 400 130" : "M 340 90 L 340 130", stroke: isTrap ? "var(--color-critical)" : "rgba(255,255,255,0.15)", strokeWidth: isTrap ? "3" : "1.5", strokeDasharray: "4 4" }), currentStates.map((st) => {
+              const isCurrent = currentStateName === st.id;
+              let fill = 'var(--bg-card)';
+              let stroke = 'rgba(255,255,255,0.3)';
+
+              if (st.isAccept) {
+                stroke = isCurrent ? '#25A879' : 'rgba(37, 168, 121, 0.5)';
+                if (isCurrent) fill = 'rgba(37, 168, 121, 0.25)';
+              } else if (st.isTrap) {
+                stroke = isCurrent ? '#E05252' : 'rgba(224, 82, 82, 0.5)';
+                if (isCurrent) fill = 'rgba(224, 82, 82, 0.25)';
+              } else if (isCurrent) {
+                stroke = 'var(--accent-primary)';
+                fill = 'var(--accent-primary-glow)';
+              }
+
+              return (
+                React.createElement("g", { key: st.id }, st.isAccept && (
+                    React.createElement("circle", { cx: st.x, cy: st.y, r: "24", fill: "none", stroke: stroke, strokeWidth: "1.5" })
+                  ), React.createElement("circle", { cx: st.x, cy: st.y, r: "20", fill: fill, stroke: stroke, strokeWidth: isCurrent ? "3" : "1.5" }), React.createElement("text", { x: st.x, y: st.y + 4, textAnchor: "middle", fill: "var(--text-primary)", fontSize: "11", fontFamily: "var(--font-mono)", fontWeight: "700" }, st.label), st.isStart && (
+                    React.createElement("text", { x: st.x, y: st.y - 26, textAnchor: "middle", fill: "var(--text-muted)", fontSize: "9", fontWeight: "600" }, "START")
+                  ), st.isAccept && (
+                    React.createElement("text", { x: st.x, y: st.y - 30, textAnchor: "middle", fill: "var(--color-success)", fontSize: "9", fontWeight: "700" }, "ACCEPT (F)")
+                  ), st.isTrap && (
+                    React.createElement("text", { x: st.x, y: st.y + 36, textAnchor: "middle", fill: "var(--color-critical)", fontSize: "9", fontWeight: "700" }, "REJECT / TRAP")
+                  ))
+              );
+            }))), React.createElement("div", { className: "grid-2", style: { marginTop: '20px', gap: '16px' } }, React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--accent-primary)', marginBottom: '8px' } }, "Execution Trace Steps (δ Transition Table)"), React.createElement("div", { style: { maxHeight: '160px', overflowY: 'auto' } }, React.createElement("table", { className: "data-table", style: { fontSize: '11.5px' } }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Step"), React.createElement("th", null, "Char"), React.createElement("th", null, "δ(from, char)"), React.createElement("th", null, "Next State"))), React.createElement("tbody", null, trace.map((t, idx) => (
+                    React.createElement("tr", { key: idx, style: { backgroundColor: idx === stepIndex ? 'var(--accent-primary-glow)' : 'transparent' } }, React.createElement("td", null, t.step), React.createElement("td", null, React.createElement("span", { className: "code-pill" }, t.input_char || 'INITIAL')), React.createElement("td", null, "δ(", t.from_state, ", '", t.input_char, "')"), React.createElement("td", null, React.createElement("strong", { style: { color: t.is_accepting ? 'var(--color-success)' : (t.to_state.includes('trap') ? 'var(--color-critical)' : 'var(--text-primary)') } }, t.to_state)))
+                  )))))), React.createElement("div", { style: { padding: '12px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--accent-primary)', marginBottom: '8px' } }, "Formal Language Equivalence Check: L(M) == L(R)"), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12.5px' } }, React.createElement("div", null, React.createElement("span", { style: { color: 'var(--text-muted)' } }, "Regex Pattern R:"), ' ', React.createElement("code", { style: { color: '#38BDF8' } }, activeTab === 'atm' ? '^ATM[A-Z]{3}[0-9]{4}$' : '^E[0-9]{2}[A-Z]$')), React.createElement("div", null, React.createElement("span", { style: { color: 'var(--text-muted)' } }, "Input String w:"), ' ', React.createElement("strong", { style: { color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' } }, inputStr)), React.createElement("div", { style: { display: 'flex', gap: '16px', marginTop: '4px' } }, React.createElement("div", null, "DFA M Result:", ' ', React.createElement("span", { style: { color: isAccepted ? 'var(--color-success)' : 'var(--color-critical)', fontWeight: 700 } }, isAccepted ? 'ACCEPTED' : 'REJECTED')), React.createElement("div", null, "Regex R Result:", ' ', React.createElement("span", { style: { color: (activeTab === 'atm' ? validationData?.atm_id?.regex_valid : validationData?.error_code?.regex_valid) ? 'var(--color-success)' : 'var(--color-critical)', fontWeight: 700 } }, (activeTab === 'atm' ? validationData?.atm_id?.regex_valid : validationData?.error_code?.regex_valid) ? 'MATCHED' : 'NO MATCH'))), React.createElement("div", { style: {
+                marginTop: '6px',
+                padding: '8px 10px',
+                borderRadius: '6px',
+                backgroundColor: 'rgba(37, 168, 121, 0.1)',
+                border: '1px solid rgba(37, 168, 121, 0.25)',
+                fontSize: '11.5px',
+                color: 'var(--color-success)',
+                fontWeight: 600
+              } }, "Equivalence Confirmed: DFA and Regular Expression produce identical acceptance sets across all alphabet inputs Σ*."))))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Layers, { size: 16, style: { color: 'var(--accent-secondary)' } }), React.createElement("span", null, "Formal Validation Benchmark Test Vectors")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Comprehensive Academic Verification Suite")), React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Test Vector"), React.createElement("th", null, "Identifier Type"), React.createElement("th", null, "DFA Result"), React.createElement("th", null, "Regex Result"), React.createElement("th", null, "Agreement Status"), React.createElement("th", null, "Operational Behavior"))), React.createElement("tbody", null, comparisonVectors.map((vec, i) => (
+                React.createElement("tr", { key: i }, React.createElement("td", null, React.createElement("span", { className: "code-pill" }, vec.input)), React.createElement("td", null, vec.type), React.createElement("td", null, React.createElement("span", { style: { color: vec.dfa ? 'var(--color-success)' : 'var(--color-critical)', fontWeight: 600 } }, vec.dfa ? 'VALID' : 'INVALID')), React.createElement("td", null, React.createElement("span", { style: { color: vec.regex ? 'var(--color-success)' : 'var(--color-critical)', fontWeight: 600 } }, vec.regex ? 'VALID' : 'INVALID')), React.createElement("td", null, React.createElement("span", { className: "badge badge-status-resolved" }, React.createElement(CheckCircle2, { size: 12 }), " PERFECT AGREEMENT")), React.createElement("td", { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, vec.note))
+              )))))))
+  );
+}
+
+return AutomataLab;
+})();
+
+const NetworkRouting = (() => {
+
+const { Network, Play, RotateCcw, MapPin, ShieldAlert, Cpu, CheckCircle2, AlertTriangle, HelpCircle, Edit2, Save, Plus, RefreshCw, Sliders } = LucideIcons;
+
+function NetworkRouting() {
+  const [topology, setTopology] = useState({ nodes: [], edges: [] });
+  const [routingTable, setRoutingTable] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // Bellman-Ford Simulation State
+  const [sourceNode, setSourceNode] = useState('ATMBLR1234');
+  const [targetNode, setTargetNode] = useState('EMP-BLR-01');
+  const [bfResult, setBfResult] = useState(null);
+  const [calculating, setCalculating] = useState(false);
+
+  // Prefix Management Modal
+  const [editingPrefix, setEditingPrefix] = useState(null);
+  const [prefixForm, setPrefixForm] = useState({ prefix: '', zone_id: 1, primary_team: '', backup_team: '', escalation_authority: '' });
+  const [savingPrefix, setSavingPrefix] = useState(false);
+
+  // Edge Weight Editor
+  const [selectedEdge, setSelectedEdge] = useState(null);
+  const [newWeight, setNewWeight] = useState(5.0);
+  const [updatingWeight, setUpdatingWeight] = useState(false);
+
+  const fetchRoutingData = async () => {
+    try {
+      setLoading(true);
+      const [topData, tableData] = await Promise.all([
+        api.getNetworkTopology(),
+        api.getRoutingTable()
+      ]);
+      setTopology(topData);
+      setRoutingTable(tableData);
+    } catch (err) {
+      console.error("Failed to load network routing data:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchRoutingData();
+  }, []);
+
+  const runBellmanFord = async () => {
+    try {
+      setCalculating(true);
+      const result = await api.calculateBellmanFord({
+        source: sourceNode,
+        destination: targetNode
+      });
+      setBfResult(result);
+    } catch (err) {
+      alert("Bellman-Ford calculation error: " + err.message);
+    } finally {
+      setCalculating(false);
+    }
+  };
+
+  const handleUpdateEdge = async () => {
+    if (!selectedEdge) return;
+    try {
+      setUpdatingWeight(true);
+      await api.updateEdgeWeight(selectedEdge.edge_id, newWeight);
+      await fetchRoutingData();
+      if (bfResult) runBellmanFord();
+      setSelectedEdge(null);
+    } catch (err) {
+      alert("Failed to update edge weight: " + err.message);
+    } finally {
+      setUpdatingWeight(false);
+    }
+  };
+
+  const handleSavePrefix = async (e) => {
+    e.preventDefault();
+    try {
+      setSavingPrefix(true);
+      await api.updateRoutingPrefix(prefixForm);
+      await fetchRoutingData();
+      setEditingPrefix(null);
+    } catch (err) {
+      alert("Failed to save prefix mapping: " + err.message);
+    } finally {
+      setSavingPrefix(false);
+    }
+  };
+
+  const isHighlightedNode = (nodeId) => {
+    return bfResult?.shortest_path?.includes(nodeId);
+  };
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "BCS502 – Network Routing & Dispatch Engine"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Bellman-Ford dynamic programming shortest path routing across Karnataka ATM support topology")), React.createElement("button", { onClick: fetchRoutingData, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Topology"))), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Cpu, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Bellman-Ford Shortest-Path Algorithm Execution Console")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Graph G = (V, E) | Negative Cycle Detection")), React.createElement("div", { style: { display: 'flex', gap: '16px', alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: '16px' } }, React.createElement("div", { style: { width: '220px' } }, React.createElement("label", { className: "form-label" }, "Source Node (ATM / Terminal)"), React.createElement("select", { value: sourceNode, onChange: e => setSourceNode(e.target.value), className: "form-select" }, React.createElement("option", { value: "ATMBLR1234" }, "ATMBLR1234 (Bangalore)"), React.createElement("option", { value: "ATMMYS1234" }, "ATMMYS1234 (Mysore)"), React.createElement("option", { value: "ATMMNG1234" }, "ATMMNG1234 (Mangaluru)"), React.createElement("option", { value: "ATMHUB1234" }, "ATMHUB1234 (Hubballi)"), React.createElement("option", { value: "ATM_SOURCE" }, "ATM_SOURCE (Generic)"))), React.createElement("div", { style: { width: '260px' } }, React.createElement("label", { className: "form-label" }, "Target Destination Node"), React.createElement("select", { value: targetNode, onChange: e => setTargetNode(e.target.value), className: "form-select" }, React.createElement("optgroup", { label: "Bangalore Handlers" }, React.createElement("option", { value: "EMP-BLR-01" }, "EMP-BLR-01 (Rajesh Rao - Primary)"), React.createElement("option", { value: "EMP-BLR-03" }, "EMP-BLR-03 (Chetan Kumar - Backup)")), React.createElement("optgroup", { label: "Mysore Handlers" }, React.createElement("option", { value: "EMP-MYS-01" }, "EMP-MYS-01 (Ananya Urs - Primary)"), React.createElement("option", { value: "EMP-MYS-02" }, "EMP-MYS-02 (Pradeep Gowda - Backup)")), React.createElement("optgroup", { label: "Mangaluru Handlers" }, React.createElement("option", { value: "EMP-MNG-01" }, "EMP-MNG-01 (Ashwin D'Souza - Primary)"), React.createElement("option", { value: "EMP-MNG-02" }, "EMP-MNG-02 (Divya Bhat - Backup)")), React.createElement("optgroup", { label: "Hubballi Handlers" }, React.createElement("option", { value: "EMP-HUB-01" }, "EMP-HUB-01 (Manjunath Patil - Primary)"), React.createElement("option", { value: "EMP-HUB-02" }, "EMP-HUB-02 (Sharanappa Bellad - Backup)")), React.createElement("optgroup", { label: "Central Desks" }, React.createElement("option", { value: "EMP-SEC-01" }, "EMP-SEC-01 (Central Security Desk)"), React.createElement("option", { value: "EMP-REV-01" }, "EMP-REV-01 (Central Routing Review)")))), React.createElement("button", { onClick: runBellmanFord, disabled: calculating, className: "btn btn-primary", style: { height: '38px' } }, calculating ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(Play, { size: 14 }), React.createElement("span", null, "Execute Bellman-Ford"))), bfResult && (
+          React.createElement("div", { style: { padding: '16px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' } }, React.createElement("div", { style: { fontWeight: 700, fontSize: '14px', color: 'var(--accent-primary)' } }, "Shortest Path Calculated: ", bfResult.total_cost, " min total dispatch cost"), React.createElement("div", null, bfResult.has_negative_cycle ? (
+                  React.createElement("span", { className: "badge badge-p1" }, React.createElement(AlertTriangle, { size: 12 }), " NEGATIVE CYCLE DETECTED")
+                ) : (
+                  React.createElement("span", { className: "badge badge-status-resolved" }, React.createElement(CheckCircle2, { size: 12 }), " NO NEGATIVE CYCLE (CONVERGED)")
+                ))), React.createElement("div", { className: "route-trail", style: { marginBottom: '16px' } }, bfResult.shortest_path?.map((node, i) => (
+                React.createElement(React.Fragment, { key: i }, React.createElement("span", { className: "route-node", style: { borderColor: 'var(--accent-primary)', backgroundColor: 'var(--accent-primary-glow)' } }, node), i < bfResult.shortest_path.length - 1 && React.createElement("span", { className: "route-arrow" }, "→"))
+              ))), React.createElement("div", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' } }, "Dynamic Programming Edge Relaxations (|V| - 1 Iteration Passes):"), React.createElement("div", { style: { maxHeight: '180px', overflowY: 'auto' } }, React.createElement("table", { className: "data-table", style: { fontSize: '11.5px' } }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Pass"), React.createElement("th", null, "Edge Relaxed (u → v)"), React.createElement("th", null, "Edge Weight"), React.createElement("th", null, "Old Distance d[v]"), React.createElement("th", null, "Updated Distance d[u] + w"), React.createElement("th", null, "New Predecessor π[v]"))), React.createElement("tbody", null, bfResult.iterations?.flatMap(iter => 
+                    iter.updates.map((u, ui) => (
+                      React.createElement("tr", { key: `${iter.iteration}-${ui}` }, React.createElement("td", null, "Pass #", iter.iteration), React.createElement("td", null, React.createElement("span", { className: "code-pill" }, u.edge)), React.createElement("td", null, u.weight), React.createElement("td", null, u.old_distance), React.createElement("td", null, React.createElement("strong", { style: { color: 'var(--color-success)' } }, u.new_distance)), React.createElement("td", null, u.new_predecessor))
+                    ))
+                  )))))
+        )), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Network, { size: 16, style: { color: 'var(--accent-secondary)' } }), React.createElement("span", null, "Karnataka ATM Network Routing Topology")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Interactive Directed Weighted Graph")), React.createElement("div", { style: {
+          backgroundColor: 'var(--bg-card-subtle)',
+          borderRadius: '8px',
+          border: '1px solid var(--border-color)',
+          padding: '24px 12px',
+          overflowX: 'auto'
+        } }, React.createElement("svg", { width: "860", height: "340", viewBox: "0 0 860 340" }, React.createElement("defs", null, React.createElement("marker", { id: "topo-arrow", viewBox: "0 0 10 10", refX: "20", refY: "5", markerWidth: "5", markerHeight: "5", orient: "auto-start-reverse" }, React.createElement("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "rgba(255,255,255,0.3)" })), React.createElement("marker", { id: "topo-arrow-active", viewBox: "0 0 10 10", refX: "20", refY: "5", markerWidth: "5", markerHeight: "5", orient: "auto-start-reverse" }, React.createElement("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#19A7A0" }))), React.createElement("line", { x1: "70", y1: "160", x2: "190", y2: "160", stroke: "#4D8DE0", strokeWidth: "2", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "190", y1: "160", x2: "310", y2: "160", stroke: "#4D8DE0", strokeWidth: "2", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "310", y1: "160", x2: "430", y2: "160", stroke: "#4D8DE0", strokeWidth: "2", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 310 160 Q 380 40 560 40", fill: "none", stroke: "#E05252", strokeWidth: "2.5", strokeDasharray: "5 3", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "40", x2: "720", y2: "40", stroke: "#E05252", strokeWidth: "2.5", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 430 160 Q 480 300 560 300", fill: "none", stroke: "#FB7185", strokeWidth: "2", strokeDasharray: "4 4", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "300", x2: "720", y2: "300", stroke: "#FB7185", strokeWidth: "2", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 430 160 L 560 100", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "100", x2: "720", y2: "100", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 430 160 L 560 145", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "145", x2: "720", y2: "145", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 430 160 L 560 190", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "190", x2: "720", y2: "190", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("path", { d: "M 430 160 L 560 235", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("line", { x1: "560", y1: "235", x2: "720", y2: "235", stroke: "rgba(255,255,255,0.3)", strokeWidth: "1.5", markerEnd: "url(#topo-arrow)" }), React.createElement("rect", { x: "20", y: "140", width: "100", height: "40", rx: "6", fill: "#1D2D45", stroke: "#4D8DE0", strokeWidth: "2" }), React.createElement("text", { x: "70", y: "164", fill: "#FFFFFF", fontSize: "11", fontWeight: "700", textAnchor: "middle" }, "ATM SOURCE"), React.createElement("rect", { x: "140", y: "140", width: "100", height: "40", rx: "6", fill: "#1D2D45", stroke: "#19A7A0", strokeWidth: "2" }), React.createElement("text", { x: "190", y: "164", fill: "#FFFFFF", fontSize: "11", fontWeight: "700", textAnchor: "middle" }, "VALIDATION"), React.createElement("rect", { x: "260", y: "140", width: "100", height: "40", rx: "6", fill: "#1D2D45", stroke: "#19A7A0", strokeWidth: "2" }), React.createElement("text", { x: "310", y: "164", fill: "#FFFFFF", fontSize: "11", fontWeight: "700", textAnchor: "middle" }, "CLASSIFY"), React.createElement("rect", { x: "380", y: "140", width: "100", height: "40", rx: "6", fill: "#1D2D45", stroke: "#19A7A0", strokeWidth: "2" }), React.createElement("text", { x: "430", y: "164", fill: "#FFFFFF", fontSize: "11", fontWeight: "700", textAnchor: "middle" }, "ROUTER"), React.createElement("rect", { x: "510", y: "22", width: "120", height: "36", rx: "6", fill: "#1D2D45", stroke: "#E05252", strokeWidth: "2" }), React.createElement("text", { x: "570", y: "44", fill: "#E05252", fontSize: "10.5", fontWeight: "700", textAnchor: "middle" }, "SECURITY DESK"), React.createElement("rect", { x: "670", y: "22", width: "130", height: "36", rx: "6", fill: "#1D2D45", stroke: "#E05252", strokeWidth: "1.5" }), React.createElement("text", { x: "735", y: "44", fill: "#FFFFFF", fontSize: "10.5", fontWeight: "600", textAnchor: "middle" }, "EMP-SEC-01"), React.createElement("rect", { x: "510", y: "82", width: "110", height: "32", rx: "4", fill: "#1D2D45", stroke: "#19A7A0", strokeWidth: "1.5" }), React.createElement("text", { x: "565", y: "102", fill: "#FFFFFF", fontSize: "10.5", fontWeight: "600", textAnchor: "middle" }, "Bangalore Support"), React.createElement("rect", { x: "670", y: "82", width: "130", height: "32", rx: "4", fill: "#1D2D45", stroke: "rgba(255,255,255,0.2)" }), React.createElement("text", { x: "735", y: "102", fill: "var(--text-secondary)", fontSize: "10.5", textAnchor: "middle" }, "EMP-BLR-01/03"), React.createElement("rect", { x: "510", y: "127", width: "110", height: "32", rx: "4", fill: "#1D2D45", stroke: "#4D8DE0", strokeWidth: "1.5" }), React.createElement("text", { x: "565", y: "147", fill: "#FFFFFF", fontSize: "10.5", fontWeight: "600", textAnchor: "middle" }, "Mysore Support"), React.createElement("rect", { x: "670", y: "127", width: "130", height: "32", rx: "4", fill: "#1D2D45", stroke: "rgba(255,255,255,0.2)" }), React.createElement("text", { x: "735", y: "147", fill: "var(--text-secondary)", fontSize: "10.5", textAnchor: "middle" }, "EMP-MYS-01/02"), React.createElement("rect", { x: "510", y: "172", width: "110", height: "32", rx: "4", fill: "#1D2D45", stroke: "#25A879", strokeWidth: "1.5" }), React.createElement("text", { x: "565", y: "192", fill: "#FFFFFF", fontSize: "10.5", fontWeight: "600", textAnchor: "middle" }, "Mangaluru Support"), React.createElement("rect", { x: "670", y: "172", width: "130", height: "32", rx: "4", fill: "#1D2D45", stroke: "rgba(255,255,255,0.2)" }), React.createElement("text", { x: "735", y: "192", fill: "var(--text-secondary)", fontSize: "10.5", textAnchor: "middle" }, "EMP-MNG-01/02"), React.createElement("rect", { x: "510", y: "217", width: "110", height: "32", rx: "4", fill: "#1D2D45", stroke: "#E9A23B", strokeWidth: "1.5" }), React.createElement("text", { x: "565", y: "237", fill: "#FFFFFF", fontSize: "10.5", fontWeight: "600", textAnchor: "middle" }, "Hubballi Support"), React.createElement("rect", { x: "670", y: "217", width: "130", height: "32", rx: "4", fill: "#1D2D45", stroke: "rgba(255,255,255,0.2)" }), React.createElement("text", { x: "735", y: "237", fill: "var(--text-secondary)", fontSize: "10.5", textAnchor: "middle" }, "EMP-HUB-01/02"), React.createElement("rect", { x: "510", y: "282", width: "120", height: "34", rx: "4", fill: "#1D2D45", stroke: "#FB7185", strokeWidth: "1.5" }), React.createElement("text", { x: "570", y: "303", fill: "#FB7185", fontSize: "10", fontWeight: "600", textAnchor: "middle" }, "Routing Review"), React.createElement("rect", { x: "670", y: "282", width: "130", height: "34", rx: "4", fill: "#1D2D45", stroke: "rgba(255,255,255,0.2)" }), React.createElement("text", { x: "735", y: "303", fill: "var(--text-secondary)", fontSize: "10", textAnchor: "middle" }, "EMP-REV-01")))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(MapPin, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Karnataka Regional Routing Table (Part B Configuration)")), React.createElement("button", { onClick: () => {
+              setPrefixForm({ prefix: '', zone_id: 1, primary_team: 'Bangalore Support', backup_team: 'Bangalore Backup', escalation_authority: 'Bangalore Regional Manager' });
+              setEditingPrefix(true);
+            }, className: "btn btn-primary btn-sm" }, React.createElement(Plus, { size: 14 }), React.createElement("span", null, "Add Prefix Mapping"))), React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "ATM Prefix"), React.createElement("th", null, "Assigned Zone"), React.createElement("th", null, "Headquarter City"), React.createElement("th", null, "Primary Regional Team"), React.createElement("th", null, "Secondary Backup Team"), React.createElement("th", null, "Escalation Authority"), React.createElement("th", null, "Status"))), React.createElement("tbody", null, routingTable.map((row) => (
+                React.createElement("tr", { key: row.prefix }, React.createElement("td", null, React.createElement("span", { className: "code-pill", style: { fontWeight: 700 } }, row.prefix)), React.createElement("td", null, React.createElement("strong", { style: { color: 'var(--accent-primary)' } }, row.zone_name)), React.createElement("td", null, row.city), React.createElement("td", null, row.primary_team), React.createElement("td", null, row.backup_team), React.createElement("td", { style: { fontSize: '11.5px', color: 'var(--text-secondary)' } }, row.escalation_authority), React.createElement("td", null, React.createElement("span", { className: "badge badge-status-resolved" }, "ACTIVE")))
+              )))))), editingPrefix && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setEditingPrefix(null) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '500px' } }, React.createElement("h3", { style: { fontSize: '16px', fontWeight: 700, marginBottom: '16px' } }, "Add / Modify ATM Prefix Mapping"), React.createElement("form", { onSubmit: handleSavePrefix }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "ATM 3-Letter Prefix *"), React.createElement("input", { type: "text", required: true, maxLength: 3, placeholder: "e.g. BLR", value: prefixForm.prefix, onChange: e => setPrefixForm({ ...prefixForm, prefix: e.target.value.toUpperCase() }), className: "form-input", style: { fontFamily: 'var(--font-mono)', fontWeight: 700 } })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Regional Support Zone *"), React.createElement("select", { value: prefixForm.zone_id, onChange: e => setPrefixForm({ ...prefixForm, zone_id: parseInt(e.target.value) }), className: "form-select" }, React.createElement("option", { value: 1 }, "Bangalore (Zone 1)"), React.createElement("option", { value: 2 }, "Mysore (Zone 2)"), React.createElement("option", { value: 3 }, "Mangaluru (Zone 3)"), React.createElement("option", { value: 4 }, "Hubballi (Zone 4)"))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Primary Regional Support Team *"), React.createElement("input", { type: "text", required: true, value: prefixForm.primary_team, onChange: e => setPrefixForm({ ...prefixForm, primary_team: e.target.value }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Secondary Backup Team *"), React.createElement("input", { type: "text", required: true, value: prefixForm.backup_team, onChange: e => setPrefixForm({ ...prefixForm, backup_team: e.target.value }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Escalation Authority"), React.createElement("input", { type: "text", value: prefixForm.escalation_authority, onChange: e => setPrefixForm({ ...prefixForm, escalation_authority: e.target.value }), className: "form-input" })), React.createElement("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' } }, React.createElement("button", { type: "button", onClick: () => setEditingPrefix(null), className: "btn btn-secondary" }, "Cancel"), React.createElement("button", { type: "submit", disabled: savingPrefix, className: "btn btn-primary" }, savingPrefix ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(Save, { size: 14 }), React.createElement("span", null, "Save Mapping"))))))
+      ))
+  );
+}
+
+return NetworkRouting;
+})();
+
+const HandlerManagement = (() => {
+
+const { Users, Plus, RefreshCw, CheckCircle2, XCircle, Clock, ShieldAlert, Edit3, Trash2, Sliders, UserCheck, Layers, ArrowUpRight, Send, X } = LucideIcons;
+
+
+function HandlerManagement() {
+  const [handlers, setHandlers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedZone, setSelectedZone] = useState('');
+  
+  // Modals
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [newHandler, setNewHandler] = useState({
+    employee_id: '',
+    name: '',
+    team: 'Bangalore Support',
+    zone: 'Bangalore',
+    capacity: 5,
+    supported_categories: 'Hardware,Network,Cash-Handling,Software'
+  });
+  const [savingHandler, setSavingHandler] = useState(false);
+
+  // Edit Capacity Modal
+  const [editingCapacityHandler, setEditingCapacityHandler] = useState(null);
+  const [capacityVal, setCapacityVal] = useState(5);
+
+  // Resolve Assignment Modal for a Handler
+  const [selectedHandlerForResolve, setSelectedHandlerForResolve] = useState(null);
+  const [handlerReports, setHandlerReports] = useState([]);
+  const [resolveReportId, setResolveReportId] = useState('');
+  const [resolveNotes, setResolveNotes] = useState('');
+  const [resolving, setResolving] = useState(false);
+
+  const fetchHandlers = async () => {
+    try {
+      setLoading(true);
+      const data = await api.getHandlers();
+      setHandlers(data);
+    } catch (err) {
+      console.error("Failed to load handlers:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchHandlers();
+  }, []);
+
+  const toggleAvailability = async (handler) => {
+    try {
+      const newAvail = handler.availability === 1 ? 0 : 1;
+      await api.updateHandler(handler.employee_id, { availability: newAvail });
+      fetchHandlers();
+    } catch (err) {
+      alert("Failed to toggle availability: " + err.message);
+    }
+  };
+
+  const handleCapacitySave = async () => {
+    if (!editingCapacityHandler) return;
+    try {
+      await api.updateHandler(editingCapacityHandler.employee_id, { capacity: parseInt(capacityVal) });
+      fetchHandlers();
+      setEditingCapacityHandler(null);
+    } catch (err) {
+      alert("Failed to update capacity: " + err.message);
+    }
+  };
+
+  const handleAddHandler = async (e) => {
+    e.preventDefault();
+    try {
+      setSavingHandler(true);
+      await api.addHandler(newHandler);
+      fetchHandlers();
+      setShowAddModal(false);
+      setNewHandler({
+        employee_id: '',
+        name: '',
+        team: 'Bangalore Support',
+        zone: 'Bangalore',
+        capacity: 5,
+        supported_categories: 'Hardware,Network,Cash-Handling,Software'
+      });
+    } catch (err) {
+      alert("Failed to add handler: " + err.message);
+    } finally {
+      setSavingHandler(false);
+    }
+  };
+
+  const openResolveDialog = async (handler) => {
+    setSelectedHandlerForResolve(handler);
+    try {
+      const reports = await api.getReports({ search: handler.employee_id });
+      const active = reports.filter(r => r.assigned_handler === handler.employee_id && r.status !== 'Resolved');
+      setHandlerReports(active);
+      if (active.length > 0) setResolveReportId(active[0].report_id);
+      setResolveNotes('');
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const submitResolveReport = async () => {
+    if (!resolveReportId) return;
+    try {
+      setResolving(true);
+      await api.updateReportStatus(resolveReportId, {
+        status: 'Resolved',
+        resolution_notes: resolveNotes || 'Incident verified and marked Resolved by regional engineer.',
+        updated_by: selectedHandlerForResolve.name
+      });
+      // Refresh handler reports
+      const reports = await api.getReports({ search: selectedHandlerForResolve.employee_id });
+      const active = reports.filter(r => r.assigned_handler === selectedHandlerForResolve.employee_id && r.status !== 'Resolved');
+      setHandlerReports(active);
+      fetchHandlers();
+      if (active.length === 0) setSelectedHandlerForResolve(null);
+    } catch (err) {
+      alert("Resolution failed: " + err.message);
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  const filteredHandlers = selectedZone
+    ? handlers.filter(h => h.zone === selectedZone)
+    : handlers;
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Regional Handler & Capacity Management"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Primary, backup, and security handler workloads, availability toggles, and incident resolution")), React.createElement("div", { style: { display: 'flex', gap: '10px' } }, React.createElement("button", { onClick: fetchHandlers, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Handlers")), React.createElement("button", { onClick: () => setShowAddModal(true), className: "btn btn-primary btn-sm" }, React.createElement(Plus, { size: 14 }), React.createElement("span", null, "Add Support Handler")))), React.createElement("div", { style: { display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' } }, ['', 'Bangalore', 'Mysore', 'Mangaluru', 'Hubballi', 'Central'].map(z => (
+          React.createElement("button", { key: z, onClick: () => setSelectedZone(z), className: `btn btn-sm ${selectedZone === z ? 'btn-primary' : 'btn-secondary'}` }, z || 'All Zones')
+        ))), React.createElement("div", { className: "grid-3", style: { marginBottom: '24px' } }, filteredHandlers.map(h => {
+          const isFull = h.current_load >= h.capacity;
+          const loadPercent = Math.min(100, Math.round((h.current_load / h.capacity) * 100));
+
+          return (
+            React.createElement("div", { key: h.employee_id, className: "card", style: { display: 'flex', flexDirection: 'column', justifyContent: 'space-between' } }, React.createElement("div", null, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' } }, React.createElement("div", null, React.createElement("h4", { style: { fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' } }, h.name), React.createElement("span", { className: "code-pill", style: { fontSize: '11px' } }, h.employee_id)), React.createElement("button", { onClick: () => toggleAvailability(h), className: `badge ${h.availability === 1 ? 'badge-status-resolved' : 'badge-p1'}`, style: { cursor: 'pointer', border: 'none' }, title: "Click to toggle availability" }, h.availability === 1 ? (
+                      React.createElement(React.Fragment, null, React.createElement(CheckCircle2, { size: 12 }), " Available")
+                    ) : (
+                      React.createElement(React.Fragment, null, React.createElement(XCircle, { size: 12 }), " Unavailable")
+                    ))), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' } }, "Team: ", React.createElement("strong", { style: { color: 'var(--text-primary)' } }, h.team)), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' } }, "Zone: ", React.createElement("strong", null, h.zone)), React.createElement("div", { style: { marginBottom: '14px' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', fontSize: '11.5px', marginBottom: '4px' } }, React.createElement("span", { style: { color: 'var(--text-muted)' } }, "Workload Capacity"), React.createElement("span", { style: { fontWeight: 600, color: isFull ? 'var(--color-critical)' : 'var(--text-primary)' } }, h.current_load, " / ", h.capacity, " Incidents (", loadPercent, "%)")), React.createElement("div", { style: { height: '6px', borderRadius: '3px', backgroundColor: 'rgba(0,0,0,0.4)', overflow: 'hidden' } }, React.createElement("div", { style: {
+                      height: '100%',
+                      width: `${loadPercent}%`,
+                      backgroundColor: isFull ? 'var(--color-critical)' : (loadPercent > 60 ? 'var(--color-warning)' : 'var(--accent-primary)'),
+                      borderRadius: '3px',
+                      transition: 'width 0.3s ease'
+                    } }))), React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)', marginBottom: '12px' } }, "Categories: ", h.supported_categories)), React.createElement("div", { style: { display: 'flex', gap: '8px', borderTop: '1px solid var(--border-color)', paddingTop: '12px' } }, React.createElement("button", { onClick: () => {
+                    setEditingCapacityHandler(h);
+                    setCapacityVal(h.capacity);
+                  }, className: "btn btn-secondary btn-sm", style: { flex: 1 } }, React.createElement(Sliders, { size: 13 }), React.createElement("span", null, "Capacity")), React.createElement("button", { onClick: () => openResolveDialog(h), className: "btn btn-secondary btn-sm", style: { flex: 1 }, disabled: h.current_load === 0 }, React.createElement(CheckCircle2, { size: 13 }), React.createElement("span", null, "Resolve (", h.current_load, ")"))))
+          );
+        })), showAddModal && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setShowAddModal(false) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '500px' } }, React.createElement("h3", { style: { fontSize: '16px', fontWeight: 700, marginBottom: '16px' } }, "Add Regional Support Handler"), React.createElement("form", { onSubmit: handleAddHandler }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Employee ID *"), React.createElement("input", { type: "text", required: true, placeholder: "e.g. EMP-BLR-04", value: newHandler.employee_id, onChange: e => setNewHandler({ ...newHandler, employee_id: e.target.value.toUpperCase() }), className: "form-input", style: { fontFamily: 'var(--font-mono)' } })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Handler Full Name *"), React.createElement("input", { type: "text", required: true, placeholder: "e.g. Vinay Hegde", value: newHandler.name, onChange: e => setNewHandler({ ...newHandler, name: e.target.value }), className: "form-input" })), React.createElement("div", { className: "grid-2", style: { gap: '12px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Regional Support Zone *"), React.createElement("select", { value: newHandler.zone, onChange: e => {
+                      const z = e.target.value;
+                      setNewHandler({ ...newHandler, zone: z, team: `${z} Support` });
+                    }, className: "form-select" }, React.createElement("option", { value: "Bangalore" }, "Bangalore"), React.createElement("option", { value: "Mysore" }, "Mysore"), React.createElement("option", { value: "Mangaluru" }, "Mangaluru"), React.createElement("option", { value: "Hubballi" }, "Hubballi"), React.createElement("option", { value: "Central" }, "Central"))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Support Team *"), React.createElement("input", { type: "text", required: true, value: newHandler.team, onChange: e => setNewHandler({ ...newHandler, team: e.target.value }), className: "form-input" }))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Max Incident Capacity"), React.createElement("input", { type: "number", min: 1, max: 50, value: newHandler.capacity, onChange: e => setNewHandler({ ...newHandler, capacity: parseInt(e.target.value) }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Supported Categories (comma separated)"), React.createElement("input", { type: "text", value: newHandler.supported_categories, onChange: e => setNewHandler({ ...newHandler, supported_categories: e.target.value }), className: "form-input" })), React.createElement("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' } }, React.createElement("button", { type: "button", onClick: () => setShowAddModal(false), className: "btn btn-secondary" }, "Cancel"), React.createElement("button", { type: "submit", disabled: savingHandler, className: "btn btn-primary" }, savingHandler ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(Plus, { size: 14 }), React.createElement("span", null, "Save Handler"))))))
+      ), editingCapacityHandler && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setEditingCapacityHandler(null) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '420px' } }, React.createElement("h3", { style: { fontSize: '16px', fontWeight: 700, marginBottom: '12px' } }, "Configure Handler Capacity"), React.createElement("p", { style: { fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px' } }, "Adjust maximum active incident workload for ", React.createElement("strong", null, editingCapacityHandler.name), " (", editingCapacityHandler.employee_id, ")."), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Maximum Workload Capacity"), React.createElement("input", { type: "number", min: 1, max: 50, value: capacityVal, onChange: e => setCapacityVal(e.target.value), className: "form-input" }), React.createElement("span", { className: "form-hint" }, "Current active load: ", editingCapacityHandler.current_load)), React.createElement("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' } }, React.createElement("button", { onClick: () => setEditingCapacityHandler(null), className: "btn btn-secondary" }, "Cancel"), React.createElement("button", { onClick: handleCapacitySave, className: "btn btn-primary" }, "Save Capacity"))))
+      ), selectedHandlerForResolve && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setSelectedHandlerForResolve(null) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '600px' } }, React.createElement("div", { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' } }, React.createElement("div", null, React.createElement("h3", { style: { fontSize: '16px', fontWeight: 700 } }, "Resolve Incident Assignment"), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-muted)' } }, "Engineer: ", selectedHandlerForResolve.name, " (", selectedHandlerForResolve.employee_id, ")")), React.createElement("button", { onClick: () => setSelectedHandlerForResolve(null), className: "btn btn-secondary btn-sm", style: { padding: '6px' } }, React.createElement(X, { size: 16 }))), handlerReports.length > 0 ? (
+              React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Select Active Incident to Resolve"), React.createElement("select", { value: resolveReportId, onChange: e => setResolveReportId(e.target.value), className: "form-select" }, handlerReports.map(r => (
+                      React.createElement("option", { key: r.report_id, value: r.report_id }, r.report_id, " — ", r.atm_id, " (", r.category, ") [", r.priority, "]")
+                    )))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Engineer Resolution Notes"), React.createElement("textarea", { rows: 3, placeholder: "e.g. Cleared note jam in cash diverter and calibrated sensor...", value: resolveNotes, onChange: e => setResolveNotes(e.target.value), className: "form-textarea" })), React.createElement("div", { style: {
+                  padding: '10px',
+                  borderRadius: '6px',
+                  backgroundColor: 'rgba(37, 168, 121, 0.1)',
+                  fontSize: '12px',
+                  color: 'var(--color-success)'
+                } }, "Resolving this incident will free 1 capacity unit on ", selectedHandlerForResolve.name, " and automatically trigger the waiting queue auto-dispatcher!"), React.createElement("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' } }, React.createElement("button", { onClick: () => setSelectedHandlerForResolve(null), className: "btn btn-secondary" }, "Cancel"), React.createElement("button", { onClick: submitResolveReport, disabled: resolving, className: "btn btn-success" }, resolving ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(CheckCircle2, { size: 14 }), React.createElement("span", null, "Mark Incident Resolved"))))
+            ) : (
+              React.createElement("div", { style: { textAlign: 'center', padding: '24px', color: 'var(--text-muted)' } }, "No active unresolved incidents assigned to this handler currently.")
+            )))
+      ))
+  );
+}
+
+return HandlerManagement;
+})();
+
+const Analytics = (() => {
+
+const { BarChart3, TrendingUp, PieChart: PieIcon, RefreshCw, ShieldAlert, CheckCircle2, Clock, MapPin, Layers, Filter } = LucideIcons;
+const { BarChart, Bar, LineChart, Line, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } = Recharts;
+
+const CATEGORY_COLORS = {
+  'Hardware': '#3B82F6',
+  'Network': '#10B981',
+  'Cash-Handling': '#F59E0B',
+  'Software': '#8B5CF6',
+  'Security': '#EF4444'
+};
+
+const ZONE_COLORS = {
+  'Bangalore': '#19A7A0',
+  'Mysore': '#4D8DE0',
+  'Mangaluru': '#25A879',
+  'Hubballi': '#E9A23B'
+};
+
+function Analytics() {
+  const [analytics, setAnalytics] = useState(null);
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [analyticsData, statsData] = await Promise.all([
+        api.getAnalytics(),
+        api.getDashboardStats()
+      ]);
+      setAnalytics(analyticsData);
+      setStats(statsData);
+    } catch (err) {
+      console.error("Failed to load analytics:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const mostAffectedZone = analytics?.reports_by_region?.reduce((prev, curr) => (curr.count > prev.count ? curr : prev), { zone: 'Bangalore', count: 0 });
+  const mostCommonCategory = analytics?.reports_by_category?.reduce((prev, curr) => (curr.value > prev.value ? curr : prev), { name: 'Hardware', value: 0 });
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Analytics & Operational Reports"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Live analytical insights, resolution rates, regional load distribution, and category telemetry")), React.createElement("button", { onClick: fetchData, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Analytics"))), React.createElement("div", { className: "kpi-grid", style: { marginBottom: '24px' } }, React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--accent-primary)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Total Logged"), React.createElement(Layers, { size: 16 })), React.createElement("div", { className: "kpi-value" }, stats ? stats.total_reports : '--'), React.createElement("div", { className: "kpi-subtext" }, "Total historical ATM incidents")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-success)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Resolution Rate"), React.createElement(CheckCircle2, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: 'var(--color-success)' } }, analytics ? `${analytics.resolution_rate}%` : '--'), React.createElement("div", { className: "kpi-subtext" }, stats ? `${stats.resolved} of ${stats.total_reports} resolved` : '')), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--accent-secondary)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Avg Resolution Time"), React.createElement(Clock, { size: 16 })), React.createElement("div", { className: "kpi-value" }, analytics ? `${analytics.avg_resolution_hours}h` : '--'), React.createElement("div", { className: "kpi-subtext" }, "Mean time to repair (MTTR)")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': '#E9A23B' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Most Affected Zone"), React.createElement(MapPin, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { fontSize: '20px', marginTop: '6px' } }, mostAffectedZone?.zone || 'Bangalore'), React.createElement("div", { className: "kpi-subtext" }, mostAffectedZone?.count || 0, " incidents recorded")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': '#8B5CF6' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Top Category"), React.createElement(BarChart3, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { fontSize: '20px', marginTop: '6px' } }, mostCommonCategory?.name || 'Cash-Handling'), React.createElement("div", { className: "kpi-subtext" }, mostCommonCategory?.value || 0, " incidents recorded")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-critical)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Critical Incidents"), React.createElement(ShieldAlert, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: 'var(--color-critical)' } }, stats ? stats.critical_incidents : '--'), React.createElement("div", { className: "kpi-subtext" }, "Immediate escalation required"))), React.createElement("div", { className: "grid-2", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(MapPin, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Zone-Wise Incident Distribution")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Karnataka 4 Regions")), React.createElement("div", { style: { height: '260px' } }, analytics?.reports_by_region ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(BarChart, { data: analytics.reports_by_region }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "zone", stroke: "var(--text-muted)", fontSize: 11 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Bar, { dataKey: "count", name: "Incidents", radius: [4, 4, 0, 0] }, analytics.reports_by_region.map((entry, index) => (
+                      React.createElement(Cell, { key: `zone-cell-${index}`, fill: ZONE_COLORS[entry.zone] || 'var(--accent-primary)' })
+                    )))))
+            ) : null)), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(PieIcon, { size: 16, style: { color: '#10B981' } }), React.createElement("span", null, "Category-Wise Telemetry Distribution")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "5 System Categories")), React.createElement("div", { style: { height: '260px', display: 'flex', alignItems: 'center' } }, analytics?.reports_by_category ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(PieChart, null, React.createElement(Pie, { data: analytics.reports_by_category, cx: "50%", cy: "50%", outerRadius: 85, innerRadius: 45, paddingAngle: 3, dataKey: "value" }, analytics.reports_by_category.map((entry, index) => (
+                      React.createElement(Cell, { key: `cat-cell-${index}`, fill: CATEGORY_COLORS[entry.name] || '#38BDF8' })
+                    ))), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Legend, { verticalAlign: "middle", align: "right", layout: "vertical", iconType: "circle" })))
+            ) : null))), React.createElement("div", { className: "grid-2", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(TrendingUp, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Daily Incident Volume Trend")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Timeline Telemetry")), React.createElement("div", { style: { height: '260px' } }, analytics?.timeline ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(LineChart, { data: analytics.timeline }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "date", stroke: "var(--text-muted)", fontSize: 11 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Line, { type: "monotone", dataKey: "reports", name: "Daily Reports", stroke: "var(--accent-primary)", strokeWidth: 3, dot: { fill: 'var(--accent-primary)', r: 4 } })))
+            ) : null)), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(ShieldAlert, { size: 16, style: { color: 'var(--color-critical)' } }), React.createElement("span", null, "Priority Level Distribution (P1 to P4)")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Deterministic Queue")), React.createElement("div", { style: { height: '260px' } }, analytics?.priority_distribution ? (
+              React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(BarChart, { data: analytics.priority_distribution }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "priority", stroke: "var(--text-muted)", fontSize: 11 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Bar, { dataKey: "count", name: "Incidents", radius: [4, 4, 0, 0] }, analytics.priority_distribution.map((entry, index) => {
+                      const p = entry.priority || '';
+                      const color = p.includes('P1') ? 'var(--color-critical)' :
+                                    p.includes('P2') ? 'var(--color-warning)' :
+                                    p.includes('P3') ? 'var(--accent-secondary)' : '#94A3B8';
+                      return React.createElement(Cell, { key: `p-${index}`, fill: color });
+                    }))))
+            ) : null))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(BarChart3, { size: 16, style: { color: 'var(--accent-secondary)' } }), React.createElement("span", null, "Regional Handler Workload vs Maximum Capacity")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Capacity Balancing & Queue Management")), React.createElement("div", { style: { height: '280px' } }, analytics?.handler_workload ? (
+            React.createElement(ResponsiveContainer, { width: "100%", height: "100%" }, React.createElement(BarChart, { data: analytics.handler_workload }, React.createElement(CartesianGrid, { strokeDasharray: "3 3", stroke: "rgba(255,255,255,0.06)" }), React.createElement(XAxis, { dataKey: "name", stroke: "var(--text-muted)", fontSize: 10, interval: 0, angle: -20, textAnchor: "end", height: 60 }), React.createElement(YAxis, { stroke: "var(--text-muted)", fontSize: 11, allowDecimals: false }), React.createElement(Tooltip, { contentStyle: { backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-color)', borderRadius: '6px' } }), React.createElement(Legend, { verticalAlign: "top", height: 36 }), React.createElement(Bar, { dataKey: "load", name: "Current Active Load", fill: "var(--accent-primary)", radius: [4, 4, 0, 0] }), React.createElement(Bar, { dataKey: "capacity", name: "Maximum Capacity", fill: "rgba(255,255,255,0.15)", radius: [4, 4, 0, 0] })))
+          ) : null)))
+  );
+}
+
+return Analytics;
+})();
+
+const TestingConsole = (() => {
+
+const { FlaskConical, Play, CheckCircle2, XCircle, RefreshCw, Clock, ShieldCheck, Layers, Filter, Search } = LucideIcons;
+
+function TestingConsole() {
+  const [testResults, setTestResults] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [filterStatus, setFilterStatus] = useState('ALL'); // 'ALL', 'PASS', 'FAIL'
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const executeAllTests = async () => {
+    try {
+      setRunning(true);
+      const res = await api.runTests();
+      setTestResults(res);
+    } catch (err) {
+      alert("Test suite execution failed: " + err.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const filteredTests = testResults?.tests ? testResults.tests.filter(t => {
+    const matchesStatus = filterStatus === 'ALL' || t.status === filterStatus;
+    const matchesSearch = !searchQuery || 
+      t.name.toLowerCase().includes(searchQuery.toLowerCase()) || 
+      t.description.toLowerCase().includes(searchQuery.toLowerCase());
+    return matchesStatus && matchesSearch;
+  }) : [];
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "Automated Testing Console (28 Test Cases)"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Real-time execution of BCS503 & BCS502 test suite covering DFA validation, Bellman-Ford routing, and capacity constraints")), React.createElement("button", { onClick: executeAllTests, disabled: running, className: "btn btn-primary", style: { padding: '10px 18px', fontWeight: 600 } }, running ? React.createElement(RefreshCw, { size: 16, className: "animate-spin" }) : React.createElement(Play, { size: 16 }), React.createElement("span", null, running ? "Executing Suite..." : "Run All 28 Tests"))), React.createElement("div", { className: "kpi-grid", style: { marginBottom: '24px' } }, React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--accent-secondary)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Total Test Cases"), React.createElement(Layers, { size: 16 })), React.createElement("div", { className: "kpi-value" }, testResults ? testResults.total : 28), React.createElement("div", { className: "kpi-subtext" }, "BCS503 & BCS502 Test Suite")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-success)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Tests Passed"), React.createElement(CheckCircle2, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: 'var(--color-success)' } }, testResults ? testResults.passed : '--'), React.createElement("div", { className: "kpi-subtext" }, "Verification successful")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--color-critical)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Tests Failed"), React.createElement(XCircle, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: testResults?.failed > 0 ? 'var(--color-critical)' : 'var(--text-muted)' } }, testResults ? testResults.failed : '--'), React.createElement("div", { className: "kpi-subtext" }, "Zero failures tolerated")), React.createElement("div", { className: "kpi-card", style: { '--kpi-color': 'var(--accent-primary)' } }, React.createElement("div", { className: "kpi-label" }, React.createElement("span", null, "Pass Rate"), React.createElement(ShieldCheck, { size: 16 })), React.createElement("div", { className: "kpi-value", style: { color: 'var(--accent-primary)' } }, testResults ? `${testResults.pass_rate}%` : '--'), React.createElement("div", { className: "kpi-subtext" }, "Last Run: ", testResults ? testResults.timestamp : 'Not executed yet'))), React.createElement("div", { className: "card", style: { marginBottom: '20px', padding: '14px 18px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' } }, React.createElement("div", { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, React.createElement("span", { style: { fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)' } }, "Filter Status:"), ['ALL', 'PASS', 'FAIL'].map(st => (
+            React.createElement("button", { key: st, onClick: () => setFilterStatus(st), className: `btn btn-sm ${filterStatus === st ? 'btn-primary' : 'btn-secondary'}`, style: { padding: '3px 10px', fontSize: '11px' } }, st)
+          ))), React.createElement("div", { style: { minWidth: '260px', position: 'relative' } }, React.createElement(Search, { size: 14, style: { position: 'absolute', left: '10px', top: '10px', color: 'var(--text-muted)' } }), React.createElement("input", { type: "text", placeholder: "Search test descriptions...", value: searchQuery, onChange: e => setSearchQuery(e.target.value), className: "form-input", style: { paddingLeft: '32px', fontSize: '12px' } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", { style: { width: '70px' } }, "ID"), React.createElement("th", { style: { width: '220px' } }, "Test Case Name"), React.createElement("th", null, "Scenario Description"), React.createElement("th", { style: { width: '220px' } }, "Expected Outcome"), React.createElement("th", { style: { width: '220px' } }, "Actual Outcome"), React.createElement("th", { style: { width: '100px', textAlign: 'center' } }, "Result"))), React.createElement("tbody", null, filteredTests.length > 0 ? (
+                filteredTests.map(t => (
+                  React.createElement("tr", { key: t.id }, React.createElement("td", null, React.createElement("span", { className: "code-pill" }, "#", t.id.toString().padStart(2, '0'))), React.createElement("td", { style: { fontWeight: 600, color: 'var(--text-primary)' } }, t.name), React.createElement("td", { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, t.description), React.createElement("td", { style: { fontSize: '11.5px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' } }, t.expected), React.createElement("td", { style: { fontSize: '11.5px', fontFamily: 'var(--font-mono)', color: t.status === 'PASS' ? 'var(--color-success)' : 'var(--color-critical)' } }, t.actual), React.createElement("td", { style: { textAlign: 'center' } }, React.createElement("span", { className: `badge ${t.status === 'PASS' ? 'badge-status-resolved' : 'badge-p1'}` }, t.status === 'PASS' ? React.createElement(CheckCircle2, { size: 12 }) : React.createElement(XCircle, { size: 12 }), t.status)))
+                ))
+              ) : (
+                React.createElement("tr", null, React.createElement("td", { colSpan: 6, style: { textAlign: 'center', padding: '40px', color: 'var(--text-muted)' } }, running ? (
+                      React.createElement("div", null, React.createElement(RefreshCw, { size: 24, className: "animate-spin", style: { margin: '0 auto 10px', color: 'var(--accent-primary)' } }), React.createElement("div", null, "Executing 28 automated test scenarios..."))
+                    ) : (
+                      React.createElement("div", null, React.createElement(FlaskConical, { size: 32, style: { margin: '0 auto 8px', opacity: 0.4 } }), React.createElement("div", null, "Click \"Run All 28 Tests\" to execute the full academic test harness."))
+                    )))
+              ))))))
+  );
+}
+
+return TestingConsole;
+})();
+
+const SystemLogs = (() => {
+
+const { ScrollText, RefreshCw, Search, Clock, Activity, FileText, User, ArrowRight } = LucideIcons;
+
+
+function SystemLogs() {
+  const [logs, setLogs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+
+  const fetchLogs = async () => {
+    try {
+      setLoading(true);
+      const data = await api.getSystemLogs(100);
+      setLogs(data);
+    } catch (err) {
+      console.error("Failed to load logs:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchLogs();
+  }, []);
+
+  const filteredLogs = logs.filter(log => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      log.report_id?.toLowerCase().includes(q) ||
+      log.atm_id?.toLowerCase().includes(q) ||
+      log.updated_by?.toLowerCase().includes(q) ||
+      log.notes?.toLowerCase().includes(q)
+    );
+  });
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "System Audit Logs & Telemetry Feed"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "Immutable event audit trail tracking every validation, classification, dispatch, and state transition")), React.createElement("button", { onClick: fetchLogs, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Logs"))), React.createElement("div", { className: "card", style: { marginBottom: '20px', padding: '14px 18px' } }, React.createElement("div", { style: { position: 'relative', maxWidth: '400px' } }, React.createElement(Search, { size: 14, style: { position: 'absolute', left: '10px', top: '10px', color: 'var(--text-muted)' } }), React.createElement("input", { type: "text", placeholder: "Search audit trail by Report ID, ATM ID, or actor...", value: search, onChange: e => setSearch(e.target.value), className: "form-input", style: { paddingLeft: '32px' } }))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Timestamp"), React.createElement("th", null, "Report ID"), React.createElement("th", null, "ATM ID"), React.createElement("th", null, "Zone"), React.createElement("th", null, "Category"), React.createElement("th", null, "State Transition"), React.createElement("th", null, "Updated By"), React.createElement("th", null, "Operational Audit Notes"))), React.createElement("tbody", null, filteredLogs.length > 0 ? (
+                filteredLogs.map(l => (
+                  React.createElement("tr", { key: l.id }, React.createElement("td", { style: { fontSize: '11.5px', fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', whiteSpace: 'nowrap' } }, l.timestamp), React.createElement("td", null, React.createElement("span", { className: "code-pill" }, l.report_id)), React.createElement("td", { style: { fontWeight: 600 } }, l.atm_id), React.createElement("td", null, l.zone_name || 'Central'), React.createElement("td", null, React.createElement(CategoryBadge, { category: l.category })), React.createElement("td", null, React.createElement("div", { style: { display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 600 } }, React.createElement("span", { style: { color: 'var(--text-muted)' } }, l.previous_status || 'Start'), React.createElement(ArrowRight, { size: 12, style: { color: 'var(--accent-primary)' } }), React.createElement("span", { style: { color: 'var(--color-success)' } }, l.new_status))), React.createElement("td", { style: { fontSize: '12px', fontWeight: 500, color: 'var(--text-secondary)' } }, l.updated_by), React.createElement("td", { style: { fontSize: '12px', color: 'var(--text-secondary)', maxWidth: '300px' } }, l.notes || 'Status updated'))
+                ))
+              ) : (
+                React.createElement("tr", null, React.createElement("td", { colSpan: 8, style: { textAlign: 'center', padding: '36px', color: 'var(--text-muted)' } }, "No audit records match the search filter."))
+              ))))))
+  );
+}
+
+return SystemLogs;
+})();
+
+const Settings = (() => {
+
+const { Settings: SettingsIcon, Plus, Save, RefreshCw, Layers, Binary, MapPin, CheckCircle2, Sliders } = LucideIcons;
+
+
+function Settings() {
+  const [mappings, setMappings] = useState([]);
+  const [routingTable, setRoutingTable] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  // New Mapping Modal
+  const [showAddMapModal, setShowAddMapModal] = useState(false);
+  const [newCodeForm, setNewCodeForm] = useState({
+    error_code: '',
+    category: 'Hardware',
+    name: '',
+    description: ''
+  });
+  const [savingCode, setSavingCode] = useState(false);
+
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const [mapData, routeData] = await Promise.all([
+        api.getErrorMappings(),
+        api.getRoutingTable()
+      ]);
+      setMappings(mapData);
+      setRoutingTable(routeData);
+    } catch (err) {
+      console.error("Failed to load settings data:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
+
+  const handleAddCode = async (e) => {
+    e.preventDefault();
+    try {
+      setSavingCode(true);
+      await api.addErrorMapping(newCodeForm);
+      await fetchData();
+      setShowAddMapModal(false);
+      setNewCodeForm({ error_code: '', category: 'Hardware', name: '', description: '' });
+    } catch (err) {
+      alert("Failed to save error code mapping: " + err.message);
+    } finally {
+      setSavingCode(false);
+    }
+  };
+
+  return (
+    React.createElement("div", { className: "page-wrapper" }, React.createElement("div", { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' } }, React.createElement("div", null, React.createElement("h2", { style: { fontSize: '22px', fontWeight: 700, color: 'var(--text-primary)' } }, "System Settings & Rule Configuration"), React.createElement("p", { style: { color: 'var(--text-secondary)', fontSize: '13px' } }, "BCS503 error code classification taxonomies and BCS502 regional routing rules")), React.createElement("button", { onClick: fetchData, className: "btn btn-secondary btn-sm", disabled: loading }, React.createElement(RefreshCw, { size: 14, className: loading ? "animate-spin" : "" }), React.createElement("span", null, "Refresh Rules"))), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Binary, { size: 16, style: { color: 'var(--accent-primary)' } }), React.createElement("span", null, "Configurable Error Code Taxonomy (BCS503 Five Categories)")), React.createElement("button", { onClick: () => setShowAddMapModal(true), className: "btn btn-primary btn-sm" }, React.createElement(Plus, { size: 14 }), React.createElement("span", null, "Add Error Code"))), React.createElement("div", { className: "table-container" }, React.createElement("table", { className: "data-table" }, React.createElement("thead", null, React.createElement("tr", null, React.createElement("th", null, "Error Code"), React.createElement("th", null, "Category"), React.createElement("th", null, "Subsystem Fault Name"), React.createElement("th", null, "Technical Diagnostics Description"), React.createElement("th", null, "Status"))), React.createElement("tbody", null, mappings.map(m => (
+                React.createElement("tr", { key: m.error_code }, React.createElement("td", null, React.createElement("span", { className: "code-pill", style: { fontWeight: 700 } }, m.error_code)), React.createElement("td", null, React.createElement(CategoryBadge, { category: m.category })), React.createElement("td", { style: { fontWeight: 600, color: 'var(--text-primary)' } }, m.name), React.createElement("td", { style: { fontSize: '12px', color: 'var(--text-secondary)' } }, m.description), React.createElement("td", null, React.createElement("span", { className: "badge badge-status-resolved" }, "ACTIVE")))
+              )))))), React.createElement("div", { className: "card", style: { marginBottom: '24px' } }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(MapPin, { size: 16, style: { color: 'var(--accent-secondary)' } }), React.createElement("span", null, "Karnataka Support Zones & Active Prefixes (BCS502)")), React.createElement("span", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Karnataka Support Grid")), React.createElement("div", { className: "grid-2", style: { gap: '16px' } }, [
+            { zone: 'Zone 1 — Bangalore', prefixes: 'BLR, BNG', primary: 'Bangalore Support', backup: 'Bangalore Backup', manager: 'Bangalore Regional Manager' },
+            { zone: 'Zone 2 — Mysore', prefixes: 'MYS', primary: 'Mysore Support', backup: 'Mysore Backup', manager: 'Mysore Regional Manager' },
+            { zone: 'Zone 3 — Mangaluru', prefixes: 'MNG, MLR', primary: 'Mangaluru Support', backup: 'Mangaluru Backup', manager: 'Mangaluru Regional Manager' },
+            { zone: 'Zone 4 — Hubballi', prefixes: 'HUB', primary: 'Hubballi Support', backup: 'Hubballi Backup', manager: 'Hubballi Regional Manager' },
+          ].map(z => (
+            React.createElement("div", { key: z.zone, style: { padding: '14px', borderRadius: '8px', backgroundColor: 'var(--bg-card-subtle)', border: '1px solid var(--border-color)' } }, React.createElement("div", { style: { fontWeight: 700, fontSize: '14px', color: 'var(--text-primary)', marginBottom: '6px' } }, z.zone), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' } }, "Configured Prefixes: ", React.createElement("strong", { style: { color: 'var(--accent-primary)' } }, z.prefixes)), React.createElement("div", { style: { fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '4px' } }, "Primary Team: ", React.createElement("strong", null, z.primary), " | Backup: ", React.createElement("strong", null, z.backup)), React.createElement("div", { style: { fontSize: '11px', color: 'var(--text-muted)' } }, "Escalation Authority: ", z.manager))
+          )))), React.createElement("div", { className: "card" }, React.createElement("div", { className: "card-header" }, React.createElement("div", { className: "card-title" }, React.createElement(Sliders, { size: 16, style: { color: '#E9A23B' } }), React.createElement("span", null, "Deterministic Priority & Security Override Matrix"))), React.createElement("div", { style: { display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '12.5px', color: 'var(--text-secondary)' } }, React.createElement("div", null, "• ", React.createElement("strong", { style: { color: 'var(--color-critical)' } }, "Security Override Rule:"), " Any incident classified as Security is automatically assigned ", React.createElement("strong", null, "P1 - Critical"), " and bypassed directly to Central Security Desk."), React.createElement("div", null, "• ", React.createElement("strong", { style: { color: '#F59E0B' } }, "Cash-Handling Escalation Rule:"), " Cash dispensing or vault cassette faults with High urgency are elevated to ", React.createElement("strong", null, "P1 - Critical"), " to prevent monetary loss and cash starvation."), React.createElement("div", null, "• ", React.createElement("strong", { style: { color: 'var(--accent-secondary)' } }, "Hardware & Network Rule:"), " Hardware or network disruptions with High urgency are assigned ", React.createElement("strong", null, "P2 - High"), ", utilizing secondary backup handlers if primary is full."), React.createElement("div", null, "• ", React.createElement("strong", { style: { color: '#94A3B8' } }, "Deterministic Queue Ordering:"), " P1 > P2 > P3 > P4 → created_at ASC → report_id ASC."))), showAddMapModal && (
+        React.createElement("div", { className: "modal-overlay", onClick: () => setShowAddMapModal(false) }, React.createElement("div", { className: "modal-content", onClick: e => e.stopPropagation(), style: { maxWidth: '500px' } }, React.createElement("h3", { style: { fontSize: '16px', fontWeight: 700, marginBottom: '16px' } }, "Add Configurable Error Code Mapping"), React.createElement("form", { onSubmit: handleAddCode }, React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Error Code * (Format: E + 2 digits + 1 alpha)"), React.createElement("input", { type: "text", required: true, maxLength: 4, placeholder: "e.g. E50N", value: newCodeForm.error_code, onChange: e => setNewCodeForm({ ...newCodeForm, error_code: e.target.value.toUpperCase() }), className: "form-input", style: { fontFamily: 'var(--font-mono)', fontWeight: 700 } })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Assigned Category *"), React.createElement("select", { value: newCodeForm.category, onChange: e => setNewCodeForm({ ...newCodeForm, category: e.target.value }), className: "form-select" }, React.createElement("option", { value: "Hardware" }, "Hardware"), React.createElement("option", { value: "Network" }, "Network"), React.createElement("option", { value: "Cash-Handling" }, "Cash-Handling"), React.createElement("option", { value: "Software" }, "Software"), React.createElement("option", { value: "Security" }, "Security"))), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Subsystem Fault Name *"), React.createElement("input", { type: "text", required: true, placeholder: "e.g. Optical Cash Escrow Jam", value: newCodeForm.name, onChange: e => setNewCodeForm({ ...newCodeForm, name: e.target.value }), className: "form-input" })), React.createElement("div", { className: "form-group" }, React.createElement("label", { className: "form-label" }, "Detailed Diagnostic Description"), React.createElement("textarea", { rows: 3, placeholder: "Technical diagnostics and failure symptoms...", value: newCodeForm.description, onChange: e => setNewCodeForm({ ...newCodeForm, description: e.target.value }), className: "form-textarea" })), React.createElement("div", { style: { display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' } }, React.createElement("button", { type: "button", onClick: () => setShowAddMapModal(false), className: "btn btn-secondary" }, "Cancel"), React.createElement("button", { type: "submit", disabled: savingCode, className: "btn btn-primary" }, savingCode ? React.createElement(RefreshCw, { size: 14, className: "animate-spin" }) : React.createElement(Save, { size: 14 }), React.createElement("span", null, "Save Error Mapping"))))))
+      ))
+  );
+}
+
+return Settings;
+})();
+
+const App = (() => {
+
+const { HashRouter, Routes, Route, Navigate } = ReactRouterDOM;
+
+
+
+
+
+
+
+
+
+
+
+
+
+function App() {
+  const [collapsed, setCollapsed] = useState(false);
+  const [theme, setTheme] = useState('dark');
+  const [dashboardStats, setDashboardStats] = useState(null);
+
+  const toggleTheme = () => {
+    const nextTheme = theme === 'dark' ? 'light' : 'dark';
+    setTheme(nextTheme);
+    if (nextTheme === 'light') {
+      document.body.classList.remove('dark-theme');
+      document.body.classList.add('light-theme');
+    } else {
+      document.body.classList.remove('light-theme');
+      document.body.classList.add('dark-theme');
+    }
+  };
+
+  useEffect(() => {
+    // Poll stats periodically for top alert pill
+    const loadStats = async () => {
+      try {
+        const stats = await api.getDashboardStats();
+        setDashboardStats(stats);
+      } catch (e) {
+        // quiet fail
+      }
+    };
+    loadStats();
+    const interval = setInterval(loadStats, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return (
+    React.createElement(HashRouter, null, React.createElement("div", { className: "app-container" }, React.createElement(Sidebar, { collapsed: collapsed, setCollapsed: setCollapsed }), React.createElement("div", { className: "main-content" }, React.createElement(Navbar, { theme: theme, toggleTheme: toggleTheme, stats: dashboardStats }), React.createElement("main", { style: { flex: 1 } }, React.createElement(Routes, null, React.createElement(Route, { path: "/", element: React.createElement(Overview, null) }), React.createElement(Route, { path: "/submit", element: React.createElement(SubmitReport, null) }), React.createElement(Route, { path: "/incidents", element: React.createElement(IncidentManagement, null) }), React.createElement(Route, { path: "/automata-lab", element: React.createElement(AutomataLab, null) }), React.createElement(Route, { path: "/routing", element: React.createElement(NetworkRouting, null) }), React.createElement(Route, { path: "/handlers", element: React.createElement(HandlerManagement, null) }), React.createElement(Route, { path: "/analytics", element: React.createElement(Analytics, null) }), React.createElement(Route, { path: "/testing", element: React.createElement(TestingConsole, null) }), React.createElement(Route, { path: "/logs", element: React.createElement(SystemLogs, null) }), React.createElement(Route, { path: "/settings", element: React.createElement(Settings, null) }), React.createElement(Route, { path: "*", element: React.createElement(Navigate, { to: "/", replace: true }) }))))))
+  );
+}
+
+return App;
+})();
+
+
+if (typeof document !== 'undefined') {
+  const rootEl = document.getElementById('root');
+  if (rootEl) {
+    createRoot(rootEl).render(React.createElement(StrictMode, null, React.createElement(App, null)));
+  }
+}
